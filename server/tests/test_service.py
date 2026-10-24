@@ -116,6 +116,13 @@ class ServiceTests(unittest.TestCase):
                     tools=result.json()["result"]["tools"]
                     self.assertEqual({t["name"] for t in tools},set(TOOL_NAMES))
                     self.assertTrue(all(t["annotations"]["readOnlyHint"] for t in tools))
+                    call={"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_study_overview",
+                        "arguments":{"collection_id":"fixture","start_date":"2026-01-01","end_date":"2026-01-01"}}}
+                    result=await client.post("/mcp",headers={**headers,"MCP-Protocol-Version":"2025-11-25"},json=call)
+                    self.assertIn("structuredContent", result.json()["result"], result.text)
+                    self.assertEqual(result.json()["result"]["structuredContent"]["data"]["reviews"],3)
+                    result=await client.post("/mcp",headers={**headers,"Authorization":"Bearer bob","MCP-Protocol-Version":"2025-11-25"},json=call)
+                    self.assertTrue(result.json()["result"]["isError"])
                     self.assertEqual((await client.delete("/v1/collections/fixture",headers={"Authorization":"Bearer reader"})).status_code,403)
             tick.cancel()
         asyncio.run(scenario())

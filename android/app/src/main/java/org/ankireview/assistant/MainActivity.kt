@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class Analysis(val daily: List<Daily>, val retention: Retention, val difficult: List<Difficult>,
-                            val workload: Map<String, Int>?, val streak: Int)
+                            val workload: Map<String, Int>?, val streak: Int, val stages: Map<Int, Map<Int, Int>>)
 
 @Composable fun AssistantApp(vm: AssistantViewModel = viewModel()) {
     val context = LocalContext.current
@@ -58,6 +58,7 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
     var replaceHistory by rememberSaveable { mutableStateOf(false) }
     var deckId by rememberSaveable { mutableStateOf<Long?>(null) }
     var sorting by rememberSaveable { mutableStateOf(WordSort.AGAIN) }
+    var chartMetric by rememberSaveable { mutableIntStateOf(0) }
     var zoneText by rememberSaveable { mutableStateOf(vm.zone()) }
     var hourText by rememberSaveable { mutableStateOf(vm.rollover().toString()) }
     var settingsError by remember { mutableStateOf<String?>(null) }
@@ -92,7 +93,8 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
         if (rangeValid) snapshot?.let { s -> value = withContext(Dispatchers.Default) {
             val stats = Statistics(s)
             Analysis(stats.daily(start!!, end!!, deckId), stats.retention(start, end, deckId),
-                stats.difficult(start, end, deckId, sorting), stats.workload(System.currentTimeMillis()), stats.streak(today))
+                stats.difficult(start, end, deckId, sorting), stats.workload(System.currentTimeMillis()), stats.streak(today),
+                stats.events(start,end,deckId).groupBy { it.type }.mapValues { (_, rows) -> rows.groupingBy { it.ease }.eachCount() })
         } }
     }
     var confirmDelete by remember { mutableStateOf(false) }
@@ -139,6 +141,7 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
                     if (s != null) {
                         Text("最近数据读取：${formatTime(s.capturedAt, s.zoneId)}")
                         InfoCard("当前快照", "${s.decks.size} 个牌组 · ${s.notes.size} 条笔记 · ${s.cards.size} 张卡片")
+                        if (s.cards.any { it.queue != null }) Text("当前队列：新卡 ${s.cards.count { it.queue == 0 }} · 学习中 ${s.cards.count { it.queue in listOf(1,3) }} · 复习 ${s.cards.count { it.queue == 2 }}（复习队列不等于今日到期数）")
                         val daily by produceState<Daily?>(null, s, today) {
                             value = withContext(Dispatchers.Default) { Statistics(s).daily(today, today).first() }
                         }
@@ -168,12 +171,20 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
                     else analysis?.let { a ->
                         if (tab == 1) {
                             InfoCard("选定范围", "${a.daily.sumOf { it.reviews }} 次复习 · ${"%.1f".format(a.daily.sumOf { it.timeMs } / 60000.0)} 分钟")
-                            Text("每日复习次数趋势")
-                            TrendChart(a.daily)
+                            Row(Modifier.horizontalScroll(rememberScrollState())) {
+                                listOf("复习次数","学习分钟","首次观察新学笔记","平均回答秒").forEachIndexed { i,label ->
+                                    FilterChip(chartMetric==i,{chartMetric=i},label={Text(label)})
+                                }
+                            }
+                            TrendChart(a.daily,chartMetric)
                             val r = a.retention
                             InfoCard("观测复习成功率", r.rate?.let { "${"%.1f".format(it * 100)}%（${r.passed}/${r.reviewed}）" } ?: "没有常规复习事件")
                             Text("常规复习中 Hard / Good / Easy 均算成功；学习与重新学习单列，不等同于 FSRS 预测保持率。")
                             Text("年轻 ${r.youngPassed}/${r.youngTotal} · 成熟 ${r.maturePassed}/${r.matureTotal}（复习前间隔 ≥21 天）")
+                            listOf(0 to "学习",1 to "常规复习",2 to "重新学习").forEach { (stage,name) ->
+                                val counts=a.stages[stage].orEmpty()
+                                Text("$name：Again ${counts[1] ?: 0} / Hard ${counts[2] ?: 0} / Good ${counts[3] ?: 0} / Easy ${counts[4] ?: 0}")
+                            }
                             a.workload?.let { Text("快照估计：积压 ${it["overdue"]} 张，未来 7 天已排定 ${it["next7Days"]} 张。") }
                             a.daily.takeLast(90).forEach { d -> Text("${d.day}  ${d.reviews} 次 / ${d.distinctCards} 张 / ${"%.1f".format(d.timeMs / 60000.0)} 分钟") }
                         } else {
@@ -182,6 +193,7 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
                                     label = { Text(mapOf(WordSort.AGAIN to "Again 次数", WordSort.RECENT to "最近遗忘", WordSort.TIME to "平均耗时", WordSort.REVIEWS to "历史次数").getValue(sort)) }) }
                             }
                             Text("按笔记聚合，保留卡片关系；Again 包括学习、复习和重新学习阶段。")
+                            Text("显示排序后的前 100 条；完整数据可通过 JSON 导出。")
                             if (a.difficult.isEmpty()) Text("选定范围没有 Again 事件。")
                             a.difficult.take(100).forEach { w ->
                                 InfoCard(android.text.Html.fromHtml(w.word, android.text.Html.FROM_HTML_MODE_LEGACY).toString().ifBlank { "笔记 ${w.noteId}" },
@@ -227,14 +239,20 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
         Text(title, style = MaterialTheme.typography.titleMedium); Text(value)
     } }
 }
-@Composable private fun TrendChart(rows: List<Daily>) {
+@Composable private fun TrendChart(rows: List<Daily>,metric: Int) {
     Canvas(Modifier.fillMaxWidth().height(120.dp)) {
-        val max = rows.maxOfOrNull { it.reviews }?.coerceAtLeast(1) ?: 1
+        val values = rows.map { d -> when(metric) {
+            1 -> d.timeMs/60000f
+            2 -> d.newNotesObserved.toFloat()
+            3 -> d.averageMs?.toFloat()?.div(1000)
+            else -> d.reviews.toFloat()
+        } }
+        val max = values.filterNotNull().maxOrNull()?.coerceAtLeast(1f) ?: 1f
         val width = size.width / rows.size.coerceAtLeast(1)
-        rows.forEachIndexed { i, d ->
+        values.forEachIndexed { i, value -> if(value != null) {
             drawLine(Color(0xFF176B61), Offset((i + .5f) * width, size.height),
-                Offset((i + .5f) * width, size.height * (1 - d.reviews.toFloat() / max)), strokeWidth = (width * .7f).coerceAtLeast(1f))
-        }
+                Offset((i + .5f) * width, size.height * (1 - value / max)), strokeWidth = (width * .7f).coerceAtLeast(1f))
+        } }
     }
 }
 private fun formatTime(ms: Long, zone: String) = Instant.ofEpochMilli(ms).atZone(ZoneId.of(zone))

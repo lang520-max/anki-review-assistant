@@ -1,7 +1,7 @@
 """HTTPS reverse proxy -> authenticated REST writes + eight read-only MCP tools."""
 from contextlib import asynccontextmanager
 from datetime import date
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Any
 from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, Header, HTTPException, Path, Request
 from fastapi.responses import JSONResponse
@@ -55,10 +55,10 @@ def create_app(settings: Settings | None = None, verifier=None, store=None):
 
     def register(name):
         @mcp.tool(name=name,description=f"Use {name} to query imported private learning data. Requires collection_id; date bounds are inclusive study days. Read returned metadata before drawing conclusions.",
-                  annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False))
+                  structured_output=True, annotations=ToolAnnotations(readOnlyHint=True,destructiveHint=False,idempotentHint=True,openWorldHint=False))
         async def tool(collection_id: str, start_date: date, end_date: date, deck_id: int | None = None,
                        card_id: int | None = None, sort: Literal["again","recent","time","reviews"]="again",
-                       offset: int=0,limit: int=100) -> dict:
+                       offset: int=0,limit: int=100) -> dict[str, Any]:
             token=get_access_token()
             if token is None or not token.subject:
                 raise ValueError("Authentication required")

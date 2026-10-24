@@ -132,7 +132,10 @@ class CloudSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
         if (!credentials.prefs.getBoolean("enabled", false)) return@withContext Result.failure()
         try {
             val record = AppDatabase.get(applicationContext).snapshots().get(id) ?: return@withContext Result.failure()
-            val snapshot = record.decode(applicationContext)
+            val localSettings=applicationContext.getSharedPreferences("settings",0)
+            val snapshot = record.decode(applicationContext).copy(
+                zoneId=localSettings.getString("zone",java.time.ZoneId.systemDefault().id)!!,
+                rolloverHour=localSettings.getInt("rollover",4))
             val allowed = credentials.prefs.getStringSet("decks", emptySet()).orEmpty().mapNotNull { it.toLongOrNull() }.toSet()
             require(allowed.isNotEmpty())
             val cards = snapshot.cards.filter { it.deckId in allowed }
