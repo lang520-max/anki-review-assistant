@@ -21,6 +21,7 @@ import java.net.URLEncoder
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.io.File
 import java.util.Base64
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -76,6 +77,9 @@ class CloudCredentials(private val context: Context) {
     }
     fun startLogin(server: String, issuer: String, clientId: String): Uri {
         disconnect()
+        prefs.all.keys.filter { it.startsWith("hash:") || it.startsWith("revision:") || it.startsWith("synced:") }
+            .forEach { prefs.edit().remove(it).commit() }
+        File(context.filesDir,"sync-checkpoints").deleteRecursively()
         require(clientId.isNotBlank()) { "请输入 OAuth 公共客户端 ID" }
         val config = request(https(issuer) + "/.well-known/openid-configuration")
         require(config.getString("issuer").trimEnd('/') == https(issuer)) { "授权服务器 issuer 不匹配" }
@@ -137,14 +141,36 @@ class CloudSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 notes = snapshot.notes.filter { it.id in noteIds }.map { if (credentials.prefs.getBoolean("content", false)) it else it.copy(fields=emptyList()) },
                 reviews = snapshot.reviews.filter { it.cardId in cardIds })
             val json = dataJson.encodeToString(filtered)
-            // Server compares rows to form incremental updates; replacing a collection also removes undone events.
             val hash = MessageDigest.getInstance("SHA-256").digest(json.toByteArray()).joinToString("") { "%02x".format(it) }
             if (hash == credentials.prefs.getString("hash:$id", null)) return@withContext Result.success()
-            val revision = credentials.prefs.getLong("revision:$id", 0)
-            val body = JSONObject().put("baseRevision", revision).put("snapshot", JSONObject(json)).put("batchId", hash)
+            val checkpoint = File(File(applicationContext.filesDir,"sync-checkpoints").apply { mkdirs() }, "$id.json")
+            // Reconcile revision before first upload after login; never reuse another account's checkpoint.
+            val previous = if (checkpoint.exists()) JSONObject(checkpoint.readText()) else null
+            val revision = if (previous != null) credentials.prefs.getLong("revision:$id", 0) else {
+                val list = credentials.request(credentials.prefs.getString("server",null)!!+"/v1/collections",token=credentials.accessToken()).getJSONArray("collections")
+                (0 until list.length()).map { list.getJSONObject(it) }.firstOrNull { it.getString("id")==id }?.getLong("revision") ?: 0
+            }
+            val next = JSONObject(json)
+            val body = JSONObject().put("baseRevision", revision).put("batchId", hash)
+            if (previous == null) body.put("snapshot",next) else {
+                val metadata = JSONObject(json); val upserts = JSONObject(); val deletes = JSONObject()
+                listOf("decks","notes","cards","reviews").forEach { table ->
+                    fun indexed(value: JSONObject): Map<Long,JSONObject> {
+                        val array = value.getJSONArray(table)
+                        return (0 until array.length()).associate { i -> array.getJSONObject(i).let { it.getLong("id") to it } }
+                    }
+                    val before = indexed(previous); val after = indexed(next)
+                    upserts.put(table,JSONArray(after.filter { (key,value) -> before[key]?.toString()!=value.toString() }.values.toList()))
+                    deletes.put(table,JSONArray((before.keys-after.keys).toList()))
+                    metadata.remove(table)
+                }
+                body.put("metadata",metadata).put("upserts",upserts).put("deletes",deletes)
+            }
             if (isStopped || !credentials.prefs.getBoolean("enabled", false)) return@withContext Result.failure()
             val response = credentials.request(credentials.prefs.getString("server", null)!! + "/v1/collections/$id/sync",
                 body.toString(), credentials.accessToken(), "POST")
+            val temporary = File(checkpoint.path+".tmp").apply { writeText(json) }
+            check(temporary.renameTo(checkpoint)) { "无法保存同步检查点" }
             credentials.prefs.edit().putString("hash:$id", hash).putLong("revision:$id", response.getLong("revision"))
                 .putLong("synced:$id", System.currentTimeMillis()).putString("status", "同步成功").commit()
             Result.success()
@@ -202,8 +228,9 @@ class CloudSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
             credentials.prefs.edit().putBoolean("enabled",false).commit()
             WorkManager.getInstance(context).cancelAllWorkByTag("cloud-sync")
             vm.runTask { _ -> snapshot?.let { s ->
-                credentials.request(credentials.prefs.getString("server",null)!!+"/v1/collections/${s.collectionId}",token=credentials.accessToken(),method="DELETE")
-                credentials.prefs.edit().remove("hash:${s.collectionId}").remove("revision:${s.collectionId}").commit()
+                val result = credentials.request(credentials.prefs.getString("server",null)!!+"/v1/collections/${s.collectionId}",token=credentials.accessToken(),method="DELETE")
+                credentials.prefs.edit().remove("hash:${s.collectionId}").putLong("revision:${s.collectionId}",result.getLong("revision")).commit()
+                File(context.filesDir,"sync-checkpoints/${s.collectionId}.json").delete()
                 vm.message.value="远程集合已删除，云同步已关闭"
             } }
         }){Text("删除")}}, dismissButton={TextButton(onClick={confirm=false}){Text("取消")}})

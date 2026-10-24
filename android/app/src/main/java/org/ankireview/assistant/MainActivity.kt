@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.ankireview.core.*
+import org.ankireview.core.Retention
 import java.time.*
 import java.time.format.DateTimeFormatter
 
