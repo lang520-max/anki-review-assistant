@@ -44,7 +44,7 @@ dependencies {
     kapt("androidx.room:room-compiler:2.7.1")
     implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
-    implementation("com.github.luben:zstd-jni:1.5.6-9@aar")
+    implementation("com.github.luben:zstd-jni:1.5.7-24@aar")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.04.01"))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
