@@ -1,0 +1,23 @@
+{
+  "realm": "anki",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "accessTokenLifespan": 300,
+  "clientScopes": [
+    {"name":"study:read","protocol":"openid-connect","attributes":{"include.in.token.scope":"true"},"protocolMappers":[{"name":"study-audience","protocol":"openid-connect","protocolMapper":"oidc-audience-mapper","config":{"included.custom.audience":"anki-review","access.token.claim":"true"}}]},
+    {"name":"study:sync","protocol":"openid-connect","attributes":{"include.in.token.scope":"true"}},
+    {"name":"study:delete","protocol":"openid-connect","attributes":{"include.in.token.scope":"true"}}
+  ],
+  "clients": [
+    {
+      "clientId":"anki-android","enabled":true,"publicClient":true,
+      "standardFlowEnabled":true,"directAccessGrantsEnabled":false,
+      "redirectUris":["org.ankireview.assistant://oauth/callback"],
+      "attributes":{"pkce.code.challenge.method":"S256"},
+      "defaultClientScopes":["profile"],
+      "optionalClientScopes":["offline_access","study:read","study:sync","study:delete"]
+    }
+  ]
+}

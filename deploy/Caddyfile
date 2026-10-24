@@ -1,0 +1,14 @@
+{$STUDY_DOMAIN} {
+    request_body {
+        max_size 64MB
+    }
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+    reverse_proxy api:8000
+}
+{$AUTH_DOMAIN} {
+    reverse_proxy keycloak:8080
+}
