@@ -32,6 +32,12 @@ class ArchiveImporter(private val context: Context) {
             }
             val database = File(directory, "collection.sqlite")
             ZipFile(archive).use { zip ->
+                val entries = zip.entries(); var entryCount = 0
+                while (entries.hasMoreElements()) {
+                    signal.throwIfCanceled(); val name = entries.nextElement().name
+                    require(++entryCount <= 100_000) { "导出包条目过多" }
+                    require(!name.startsWith('/') && '\\' !in name && ".." !in name.split('/')) { "导出包包含不安全路径" }
+                }
                 // Select newer formats first; old compatibility entries may only be placeholders.
                 val entry = listOf("collection.anki21b", "collection.anki21", "collection.anki2")
                     .firstNotNullOfOrNull { zip.getEntry(it) } ?: error("不是支持的 Anki 导出文件")

@@ -32,7 +32,7 @@ class ArchiveImportTest {
         }
         return file
     }
-    private fun archive(compressed: Boolean) {
+    private fun archive(compressed: Boolean, malicious: Boolean = false) {
         val dir=File(context.cacheDir,"fixture-${java.util.UUID.randomUUID()}").apply { mkdirs() }
         try {
             val db=database(dir); val before=db.readBytes()
@@ -43,7 +43,14 @@ class ArchiveImportTest {
                     ZstdOutputStream(out).use { it.write(before) }
                 }.toByteArray() else before
                 zip.write(bytes); zip.closeEntry()
-                zip.putNextEntry(ZipEntry("../../must-not-extract"));zip.write(byteArrayOf(1));zip.closeEntry()
+                zip.putNextEntry(ZipEntry(if(malicious) "../../must-not-extract" else "media/unused"));zip.write(byteArrayOf(1));zip.closeEntry()
+            }
+            if (malicious) {
+                val error=runCatching { ArchiveImporter(context).read(Uri.fromFile(file),"synthetic","UTC",4,CancellationSignal()) }.exceptionOrNull()
+                assertTrue(error is java.util.zip.ZipException || error is IllegalArgumentException)
+                assertArrayEquals(before,db.readBytes())
+                assertFalse(File(context.cacheDir,"must-not-extract").exists())
+                return
             }
             val result=ArchiveImporter(context).read(Uri.fromFile(file),"synthetic","UTC",4,CancellationSignal())
             assertEquals(1,result.reviews.size); assertEquals(2,result.reviews.first().ease)
@@ -54,6 +61,7 @@ class ArchiveImportTest {
     }
     @Test fun importsLegacyWithoutChangingOriginal() = archive(false)
     @Test fun importsZstdCollectionAndIgnoresOtherEntries() = archive(true)
+    @Test fun rejectsTraversalEntriesWithoutExtracting() = archive(false,true)
     @Test fun refusesUnknownSchema() {
         val dir=File(context.cacheDir,"unknown-${java.util.UUID.randomUUID()}").apply { mkdirs() }
         try {
