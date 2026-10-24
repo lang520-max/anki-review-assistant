@@ -91,13 +91,13 @@ class CloudCredentials(private val context: Context) {
         setSecret("verifier", verifier)
         return Uri.parse(https(config.getString("authorization_endpoint"))).buildUpon()
             .appendQueryParameter("client_id", clientId).appendQueryParameter("response_type", "code")
-            .appendQueryParameter("redirect_uri", "org.ankireview.assistant:/oauth")
+            .appendQueryParameter("redirect_uri", "org.ankireview.assistant://oauth/callback")
             .appendQueryParameter("scope", "openid offline_access study:read study:sync study:delete")
             .appendQueryParameter("state", state).appendQueryParameter("code_challenge", challenge)
             .appendQueryParameter("code_challenge_method", "S256").build()
     }
     fun finishLogin(uri: Uri) {
-        require(uri.scheme == "org.ankireview.assistant" && uri.path == "/oauth")
+        require(uri.scheme == "org.ankireview.assistant" && uri.host == "oauth" && uri.path == "/callback")
         val expected = prefs.getString("state", null)
         require(expected != null && uri.getQueryParameter("state") == expected &&
             System.currentTimeMillis() - prefs.getLong("login_started", 0) < 600000) { "授权请求已过期或不匹配" }
@@ -105,7 +105,7 @@ class CloudCredentials(private val context: Context) {
         val verifier = requireNotNull(secret("verifier"))
         prefs.edit().remove("state").remove("verifier").commit()
         val result = request(prefs.getString("token_endpoint", null)!!,
-            "grant_type=authorization_code&client_id=${form(prefs.getString("client", "")!!)}&code=${form(code)}&code_verifier=${form(verifier)}&redirect_uri=${form("org.ankireview.assistant:/oauth")}",
+            "grant_type=authorization_code&client_id=${form(prefs.getString("client", "")!!)}&code=${form(code)}&code_verifier=${form(verifier)}&redirect_uri=${form("org.ankireview.assistant://oauth/callback")}",
             method = "POST", contentType = "application/x-www-form-urlencoded")
         saveTokens(result)
     }
@@ -132,7 +132,7 @@ class CloudSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
         if (!credentials.prefs.getBoolean("enabled", false)) return@withContext Result.failure()
         try {
             val record = AppDatabase.get(applicationContext).snapshots().get(id) ?: return@withContext Result.failure()
-            val snapshot = dataJson.decodeFromString<Snapshot>(record.payload)
+            val snapshot = record.decode(applicationContext)
             val allowed = credentials.prefs.getStringSet("decks", emptySet()).orEmpty().mapNotNull { it.toLongOrNull() }.toSet()
             require(allowed.isNotEmpty())
             val cards = snapshot.cards.filter { it.deckId in allowed }
@@ -169,6 +169,7 @@ class CloudSyncWorker(context: Context, params: WorkerParameters) : CoroutineWor
             if (isStopped || !credentials.prefs.getBoolean("enabled", false)) return@withContext Result.failure()
             val response = credentials.request(credentials.prefs.getString("server", null)!! + "/v1/collections/$id/sync",
                 body.toString(), credentials.accessToken(), "POST")
+            if (isStopped || !credentials.prefs.getBoolean("enabled", false)) return@withContext Result.failure()
             val temporary = File(checkpoint.path+".tmp").apply { writeText(json) }
             check(temporary.renameTo(checkpoint)) { "无法保存同步检查点" }
             credentials.prefs.edit().putString("hash:$id", hash).putLong("revision:$id", response.getLong("revision"))

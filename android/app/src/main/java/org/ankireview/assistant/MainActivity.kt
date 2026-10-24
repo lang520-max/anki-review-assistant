@@ -69,7 +69,7 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
     val current = datasets.firstOrNull { it.id == selected } ?: datasets.firstOrNull()
     val snapshot by produceState<Snapshot?>(null, current, refresh) {
         value = withContext(Dispatchers.Default) {
-            current?.let { dataJson.decodeFromString<Snapshot>(it.payload).copy(zoneId = vm.zone(), rolloverHour = vm.rollover()) }
+            current?.let { it.decode(context).copy(zoneId = vm.zone(), rolloverHour = vm.rollover()) }
         }
     }
     val import = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -118,7 +118,7 @@ private data class Analysis(val daily: List<Daily>, val retention: Retention, va
                 Text("数据来源（分别保存，不自动合并）：")
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     datasets.forEach { item -> FilterChip(selected = current?.id == item.id,
-                        onClick = { vm.selected.value = item.id; deckId = null }, label = { Text(item.label) }) }
+                        onClick = { vm.selected.value = item.id; deckId = null }, label = { Text("${item.label} · ${item.id.take(6)}") }) }
                 }
             }
             val s = snapshot

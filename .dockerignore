@@ -1,0 +1,10 @@
+.git
+.env
+**/__pycache__
+**/build
+**/.gradle
+*.db
+*.apkg
+*.colpkg
+*.keystore
+*.jks

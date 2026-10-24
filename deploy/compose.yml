@@ -1,0 +1,75 @@
+services:
+  gateway:
+    image: caddy:2.11.7-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      STUDY_DOMAIN: ${STUDY_DOMAIN:?required}
+      AUTH_DOMAIN: ${AUTH_DOMAIN:?required}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [api, keycloak]
+  api:
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://study:${STUDY_DB_PASSWORD:?required}@study-db/study
+      PUBLIC_URL: https://${STUDY_DOMAIN}
+      OIDC_ISSUER: https://${AUTH_DOMAIN}/realms/anki
+      OIDC_AUDIENCE: anki-review
+      INTROSPECTION_CLIENT_ID: anki-service
+      INTROSPECTION_CLIENT_SECRET: ${INTROSPECTION_CLIENT_SECRET:?required}
+    depends_on:
+      study-db:
+        condition: service_healthy
+  study-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: study
+      POSTGRES_USER: study
+      POSTGRES_PASSWORD: ${STUDY_DB_PASSWORD:?required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U study"]
+      interval: 5s
+      retries: 10
+    volumes: ["study-data:/var/lib/postgresql/data"]
+  auth-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?required}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      retries: 10
+    volumes: ["auth-data:/var/lib/postgresql/data"]
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start", "--import-realm"]
+    restart: unless-stopped
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://auth-db/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${AUTH_DB_PASSWORD:?required}
+      KC_HOSTNAME: https://${AUTH_DOMAIN}
+      KC_HTTP_ENABLED: 'true'
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?required}
+    volumes: ["./realm.json:/opt/keycloak/data/import/realm.json:ro"]
+    depends_on:
+      auth-db:
+        condition: service_healthy
+volumes:
+  study-data:
+  auth-data:
+  caddy-data:
+  caddy-config:

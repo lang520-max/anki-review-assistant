@@ -44,13 +44,13 @@ class AssistantViewModel(app: Application) : AndroidViewModel(app) {
     fun readProvider() = runTask { cancellation ->
         val snapshot = AnkiReader(getApplication()).read(providerId, cancellation)
             .copy(zoneId = zone(), rolloverHour = rollover())
-        dao.save(snapshot, "AnkiDroid 当前状态"); selected.value = providerId; message.value = "数据读取成功"
+        dao.save(snapshot, "AnkiDroid 当前状态", getApplication()); selected.value = providerId; message.value = "数据读取成功"
     }
     fun import(uri: Uri, replaceId: String?) = runTask { cancellation ->
         val id = replaceId ?: UUID.randomUUID().toString()
         val snapshot = ArchiveImporter(getApplication()).read(uri, id, zone(), rollover(), cancellation)
         val old = replaceId?.let { dao.get(it) }
-        dao.save(snapshot, old?.label ?: "历史导入 ${java.time.LocalDate.now()}")
+        dao.save(snapshot, old?.label ?: "历史导入 ${java.time.LocalDate.now()}", getApplication())
         selected.value = id; message.value = "导入成功：${snapshot.reviews.size} 条历史。相同集合重新导入会完整替换，避免重复和保留已撤销事件。"
     }
     fun export(uri: Uri, snapshot: Snapshot, content: Boolean) = runTask { _ ->
@@ -68,6 +68,12 @@ class AssistantViewModel(app: Application) : AndroidViewModel(app) {
         message.value = "统计时区与学习日边界已保存"
     }
     fun cancel() { signal?.cancel(); task?.cancel() }
-    fun delete(id: String) = runTask { _ -> dao.delete(id); selected.value = null; message.value = "已删除助手中的本地副本，AnkiDroid 数据不受影响" }
+    fun delete(id: String) = runTask { _ ->
+        val stored = dao.get(id); dao.delete(id)
+        stored?.let { java.io.File(getApplication<Application>().filesDir,"collections/${it.payload}").delete() }
+        java.io.File(getApplication<Application>().filesDir,"sync-checkpoints/$id.json").delete()
+        androidx.work.WorkManager.getInstance(getApplication()).cancelUniqueWork("sync-$id")
+        selected.value = null; message.value = "已删除助手中的本地副本，AnkiDroid 数据不受影响"
+    }
     override fun onCleared() { cancel(); super.onCleared() }
 }
