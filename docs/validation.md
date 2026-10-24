@@ -12,7 +12,15 @@
 
 - 已实际触发 Android 构建，并修复 SDK 已移除的 tools 包、Kotlin Retention 名称冲突及 OAuth URI Lint 错误。
 - 服务端单元／ASGI 测试与 PostgreSQL 事务／删除保护测试已在 Actions 成功执行。
-- 最终 Android APK、设备测试与 PostgreSQL 完成结果将在构建结束后更新，不能把工作流文件存在等同于成功。
+- Android 实现提交 `9fd01a9358640736daf868cfdbd4e6dd7efbf184` 的构建、Lint、Kotlin 测试及 APK 上传均成功；Android 15 模拟器 6 项测试全部通过。
+
+成功运行记录：
+
+- [Android APK（含下载产物）](https://github.com/lang520-max/anki-review-assistant/actions/runs/40088591786)
+- [Android 15 模拟器 6 项测试](https://github.com/lang520-max/anki-review-assistant/actions/runs/40088591794)
+- [服务端与 PostgreSQL 测试](https://github.com/lang520-max/anki-review-assistant/actions/runs/40088591801)
+
+随后服务端增补了同步状态的服务器时间／版本返回值和历史覆盖时间范围，本地 12 项测试通过；Android 文件没有变化。
 
 ## 尚未执行
 

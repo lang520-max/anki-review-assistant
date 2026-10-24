@@ -28,6 +28,8 @@ class Analytics:
         return {"source": self.s.source, "capturedAt": self.s.capturedAt, "zoneId": self.s.zoneId,
                 "rolloverHour": self.s.rolloverHour, "historyAvailable": self.s.historyAvailable,
                 "historyComplete": self.s.historyComplete,
+                "earliestReviewAt":min((r.id for r in self.s.reviews),default=None),
+                "latestReviewAt":max((r.id for r in self.s.reviews),default=None),
                 "limitations": self.s.warnings + ["Historical deck filters use current card membership.",
                     "Recorded answer time may be capped by Anki; first observed learning is not guaranteed first-ever learning."]}
 

@@ -123,6 +123,11 @@ class ServiceTests(unittest.TestCase):
                     self.assertEqual(result.json()["result"]["structuredContent"]["data"]["reviews"],3)
                     result=await client.post("/mcp",headers={**headers,"Authorization":"Bearer bob","MCP-Protocol-Version":"2025-11-25"},json=call)
                     self.assertTrue(result.json()["result"]["isError"])
+                    call["params"]["name"]="get_sync_status"
+                    result=await client.post("/mcp",headers={**headers,"MCP-Protocol-Version":"2025-11-25"},json=call)
+                    status=result.json()["result"]["structuredContent"]["data"]
+                    self.assertEqual(status["revision"],1)
+                    self.assertGreater(status["serverSyncedAt"],0)
                     self.assertEqual((await client.delete("/v1/collections/fixture",headers={"Authorization":"Bearer reader"})).status_code,403)
             tick.cancel()
         asyncio.run(scenario())

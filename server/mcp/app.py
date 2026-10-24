@@ -66,7 +66,11 @@ def create_app(settings: Settings | None = None, verifier=None, store=None):
                 snapshot=store.get(token.subject,collection_id)
             except KeyError:
                 raise ValueError("Collection not found") from None
-            return Analytics(snapshot).query(name,start_date,end_date,deck_id,card_id,sort,offset,limit)
+            result=Analytics(snapshot).query(name,start_date,end_date,deck_id,card_id,sort,offset,limit)
+            if name=="get_sync_status":
+                state=next(v for v in store.status(token.subject) if v["id"]==collection_id)
+                result["data"].update({"revision":state["revision"],"serverSyncedAt":state["updated"]})
+            return result
         return tool
     for name in TOOL_NAMES:
         register(name)
