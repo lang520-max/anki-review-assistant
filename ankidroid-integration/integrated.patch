@@ -1,0 +1,2895 @@
+diff --git a/AnkiDroid/build.gradle b/AnkiDroid/build.gradle
+index 9940eda..df184a3 100644
+--- a/AnkiDroid/build.gradle
++++ b/AnkiDroid/build.gradle
+@@ -30,6 +30,7 @@ idea {
+ }
+ 
+ def homePath = System.properties['user.home']
++def diversionBuild = providers.gradleProperty('diversionBuild').orElse('2').get().toInteger()
+ /**
+  * @return the current git hash
+  * @example edf739d95bad7b370a6ed4398d46723f8219b3cd
+@@ -85,7 +86,7 @@ android {
+         //
+         // This ensures the correct ordering between the various types of releases (dev < alpha < beta < release) which is
+         // needed for upgrades to be offered correctly.
+-        versionCode=22203300
++        versionCode=22203299 + diversionBuild
+         versionName="2.22.3"
+         minSdk = libs.versions.minSdk.get().toInteger()
+ 
+@@ -96,6 +97,9 @@ android {
+         testInstrumentationRunner = 'com.ichi2.testutils.NewCollectionPathTestRunner'
+     }
+     signingConfigs {
++        debug {
++            storeFile file(System.getenv('ANKI_UPDATE_KEYSTORE') ?: "${rootDir}/../.android/debug.keystore")
++        }
+         release {
+             def keystorePath = System.getenv("KEYSTOREPATH")
+             if (keystorePath != null && !keystorePath.trim().isEmpty()) {
+@@ -113,9 +117,10 @@ android {
+     }
+     buildTypes {
+         named('debug') {
+-            versionNameSuffix "-debug"
++            versionNameSuffix "-routing${diversionBuild}-test"
+             debuggable true
+-            applicationIdSuffix ".debug"
++            applicationIdSuffix ".diversion"
++            resValue "string", "app_name", "AnkiDroid 分流测试"
+             splits.abi.universalApk = true // Build universal APK for debug always
+             // Check Crash Reports page on developer wiki for info on ACRA testing
+             // buildConfigField "String", "ACRA_URL", '"https://918f7f55-f238-436c-b34f-c8b5f1331fe5-bluemix.cloudant.com/acra-ankidroid/_design/acra-storage/_update/report"'
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiActivity.kt b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiActivity.kt
+index be7dc10..8954c78 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/AnkiActivity.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/AnkiActivity.kt
+@@ -194,6 +194,7 @@ open class AnkiActivity :
+ 
+     override fun onResume() {
+         super.onResume()
++        com.ichi2.anki.analysis.StudySessionClock.attach(this)
+         UsageAnalytics.sendAnalyticsScreenView(this)
+         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).cancel(
+             SIMPLE_NOTIFICATION_ID,
+@@ -202,6 +203,11 @@ open class AnkiActivity :
+         dialogHandler.executeMessage()
+     }
+ 
++    override fun onPause() {
++        com.ichi2.anki.analysis.StudySessionClock.pause(this)
++        super.onPause()
++    }
++
+     /**
+      * Sets the title of the toolbar (support action bar) for the activity.
+      *
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/DeckPicker.kt b/AnkiDroid/src/main/java/com/ichi2/anki/DeckPicker.kt
+index 09948cf..3b0ea69 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/DeckPicker.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/DeckPicker.kt
+@@ -99,6 +99,7 @@ import com.ichi2.anki.InitialActivity.StartupFailure.WebviewFailed
+ import com.ichi2.anki.IntentHandler.Companion.intentToReviewDeckFromShorcuts
+ import com.ichi2.anki.StudyOptionsFragment.StudyOptionsListener
+ import com.ichi2.anki.analytics.UsageAnalytics
++import com.ichi2.anki.updates.AppUpdater
+ import com.ichi2.anki.android.back.exitViaDoubleTapBackCallback
+ import com.ichi2.anki.android.input.ShortcutGroup
+ import com.ichi2.anki.android.input.shortcut
+@@ -956,6 +957,7 @@ open class DeckPicker :
+         // and having the activity be responsible for it. This change should reduce complexity.
+         // We should have two menu files for the DeckPicker (fragmented/non), and one for the Options (non-fragmented)
+         menuInflater.inflate(R.menu.deck_picker, menu)
++        menu.findItem(R.id.action_diversion_update).isVisible = BuildConfig.APPLICATION_ID == "com.ichi2.anki.diversion"
+         menu.findItem(R.id.deck_picker_action_filter)?.let {
+             toolbarSearchItem = it
+             setupSearchIcon(it)
+@@ -1183,6 +1185,14 @@ open class DeckPicker :
+             return true
+         }
+         when (item.itemId) {
++            R.id.action_study_analysis -> {
++                com.ichi2.anki.analysis.StudyAnalysisUi.show(this)
++                return true
++            }
++            R.id.action_diversion_update -> {
++                AppUpdater.showSettings(this)
++                return true
++            }
+             R.id.action_undo -> {
+                 Timber.i("DeckPicker:: Undo button pressed")
+                 undo()
+@@ -1305,6 +1315,8 @@ open class DeckPicker :
+         // As `loadDeckCounts` is cancelled in `migrate()`
+         val message = dialogHandler.popMessage()
+         super.onResume()
++        AppUpdater.onResume(this)
++        if (hasCollectionStoragePermissions()) com.ichi2.anki.analysis.AnalysisCloud.enqueue(this)
+         if (navDrawerIsReady() && hasCollectionStoragePermissions()) {
+             refreshState()
+         }
+@@ -1964,6 +1976,7 @@ open class DeckPicker :
+      * from the mSyncConflictResolutionListener if the first attempt determines that a full-sync is required.
+      */
+     override fun sync(conflict: ConflictResolution?) {
++        com.ichi2.anki.analysis.AnalysisCloud.enqueue(this)
+         val preferences = baseContext.sharedPrefs()
+ 
+         val hkey = preferences.getString("hkey", "")
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/InitialActivity.kt b/AnkiDroid/src/main/java/com/ichi2/anki/InitialActivity.kt
+index 0843277..c34d088 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/InitialActivity.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/InitialActivity.kt
+@@ -228,6 +228,8 @@ internal fun selectAnkiDroidFolder(
+ }
+ 
+ fun selectAnkiDroidFolder(context: Context): AnkiDroidFolder {
++    // A parallel test install must never adopt an official installation's shared collection.
++    if (BuildConfig.APPLICATION_ID == "com.ichi2.anki.diversion") return AnkiDroidFolder.AppPrivateFolder
+     val canAccessLegacyStorage = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || Environment.isExternalStorageLegacy()
+     val currentFolderIsAccessibleAndLegacy = canAccessLegacyStorage && isLegacyStorage(context, setCollectionPath = false) == true
+ 
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+index 31dc8fb..ba87bb3 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Reviewer.kt
+@@ -85,6 +85,7 @@ import com.ichi2.anki.multimedia.audio.AudioRecordingController.Companion.tempAu
+ import com.ichi2.anki.multimedia.audio.AudioRecordingController.RecordingState
+ import com.ichi2.anki.noteeditor.NoteEditorLauncher
+ import com.ichi2.anki.observability.undoableOp
++import com.ichi2.anki.libanki.sched.StudyDiversion
+ import com.ichi2.anki.pages.AnkiServer.Companion.ANKIDROID_JS_PREFIX
+ import com.ichi2.anki.pages.AnkiServer.Companion.ANKI_PREFIX
+ import com.ichi2.anki.pages.CardInfoDestination
+@@ -1185,6 +1186,8 @@ open class Reviewer :
+ 
+     override suspend fun answerCardInner(ease: Ease) {
+         val state = queueState!!
++        com.ichi2.anki.analysis.StudySessionClock.confirm(state.topCard.id)
++        val previouslyInRepair = StudyDiversion.progress(state.topCard.customData)?.inRepair == true
+         Timber.d("answerCardInner: ${currentCard!!.id} $ease")
+         var wasLeech = false
+         undoableOp(this) {
+@@ -1192,6 +1195,9 @@ open class Reviewer :
+                 wasLeech = sched.stateIsLeech(state.states.again)
+             }
+         }.also {
++            withCol { StudyDiversion.feedback(this, state.topCard.id, previouslyInRepair) }?.let {
++                showSnackbar(it, Snackbar.LENGTH_SHORT)
++            }
+             if (ease == Ease.AGAIN && wasLeech) {
+                 state.topCard.load(getColUnsafe)
+                 val leechMessage: String =
+@@ -1231,6 +1237,7 @@ open class Reviewer :
+     }
+ 
+     override fun displayCardQuestion() {
++        currentCard?.let { com.ichi2.anki.analysis.StudySessionClock.touch(it.id) }
+         statesMutated = false
+         // show timer, if activated in the deck's preferences
+         answerTimer.setupForCard(getColUnsafe, currentCard!!)
+@@ -1240,6 +1247,9 @@ open class Reviewer :
+ 
+     @VisibleForTesting
+     override fun displayCardAnswer() {
++        currentCard?.let { card ->
++            if (com.ichi2.anki.analysis.StudySessionClock.deferIfNeeded(this, card.id) { displayCardAnswer() }) return
++        }
+         if (queueState?.customSchedulingJs?.isEmpty() == true) {
+             statesMutated = true
+         }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
+index 66114aa..44931cb 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
+@@ -38,13 +38,16 @@ import androidx.fragment.app.Fragment
+ import androidx.lifecycle.Lifecycle
+ import androidx.lifecycle.lifecycleScope
+ import anki.collection.OpChanges
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
+ import com.ichi2.anki.CollectionManager.TR
+ import com.ichi2.anki.CollectionManager.withCol
+ import com.ichi2.anki.backend.stripHTMLScriptAndStyleTags
+ import com.ichi2.anki.dialogs.customstudy.CustomStudyDialog
+ import com.ichi2.anki.libanki.Collection
+ import com.ichi2.anki.libanki.Decks
++import com.ichi2.anki.libanki.sched.StudyDiversion
+ import com.ichi2.anki.observability.ChangeManager
++import com.ichi2.anki.observability.undoableOp
+ import com.ichi2.anki.reviewreminders.ReviewReminderScope
+ import com.ichi2.anki.reviewreminders.ScheduleReminders
+ import com.ichi2.anki.settings.Prefs
+@@ -191,7 +194,10 @@ class StudyOptionsFragment :
+ 
+     override fun onResume() {
+         super.onResume()
+-        refreshInterface()
++        launchCatchingTask {
++            withCol { StudyDiversion.recoverPendingMoves(this) }
++            refreshInterface()
++        }
+     }
+ 
+     private fun closeStudyOptions(result: Int) {
+@@ -263,6 +269,10 @@ class StudyOptionsFragment :
+ 
+     override fun onMenuItemSelected(item: MenuItem): Boolean {
+         when (item.itemId) {
++            R.id.action_study_diversion -> {
++                showStudyDiversion()
++                return true
++            }
+             R.id.action_deck_or_study_options -> {
+                 Timber.i("StudyOptionsFragment:: Deck or study options button pressed")
+                 if (col!!.decks.isFiltered(col!!.decks.selected())) {
+@@ -314,6 +324,47 @@ class StudyOptionsFragment :
+         }
+     }
+ 
++    private fun showStudyDiversion() {
++        launchCatchingTask {
++            val details = withCol {
++                val rule = StudyDiversion.settings(this)
++                val source = rule?.source ?: decks.selected()
++                val count = rule?.let { StudyDiversion.managedCards(this, it).size } ?: 0
++                Triple(rule, source, "原组：${decks.name(source)}（含子牌组）\n" +
++                    "修复组：${rule?.let { decks.name(it.repair) } ?: "启用时另建独立牌组"}\n" +
++                    "当前分流：$count 张卡\n\n" +
++                    "原组累计 10 次 Again 后移出；修复组连续 5 次 Easy 才返回，其他回答清零连续次数。按卡片独立计数，同一天可累计。\n\n" +
++                    "首次从启用后计数，保留原历史。管理中的卡片不再因原有顽固卡阈值自动暂停。修复组建议每天只学 5–10 分钟，需自行到时停止。")
++            }
++            val (rule, source, message) = details
++            MaterialAlertDialogBuilder(requireContext())
++                .setTitle(if (rule?.enabled == true) "单词分流 · 已启用" else "单词分流 · 未启用")
++                .setMessage(message)
++                .setPositiveButton(if (rule?.enabled == true) "保持启用" else "启用规则") { _, _ ->
++                    if (rule?.enabled != true) launchCatchingTask {
++                        withCol { StudyDiversion.enable(this, source) }
++                        refreshInterface(true)
++                        showSnackbar("已启用分流，从本次启用后开始计数")
++                    }
++                }
++                .setNegativeButton("关闭", null)
++                .apply {
++                    if (rule != null) setNeutralButton("停用并归还全部") { _, _ ->
++                        MaterialAlertDialogBuilder(requireContext())
++                            .setTitle("停用并归还？")
++                            .setMessage("把本规则分流的卡片放回各自原组，本轮计数归零；复习历史保留。可用撤销恢复。")
++                            .setPositiveButton("停用并归还") { _, _ ->
++                                launchCatchingTask {
++                                    undoableOp { StudyDiversion.returnAllAndDisable(this) }
++                                    refreshInterface(true)
++                                    showSnackbar("已停用分流并归还卡片")
++                                }
++                            }.setNegativeButton("取消", null).show()
++                    }
++                }.show()
++        }
++    }
++
+     private suspend fun rebuildCram() {
+         val result =
+             requireActivity().withProgress(resources.getString(R.string.rebuild_filtered_deck)) {
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/Sync.kt b/AnkiDroid/src/main/java/com/ichi2/anki/Sync.kt
+index 305a9c0..9ed6c61 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/Sync.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/Sync.kt
+@@ -265,6 +265,7 @@ private suspend fun handleNormalSync(
+             val message = if (syncMedia) R.string.col_synced_media_in_background else R.string.sync_database_acknowledge
+             deckPicker.showSyncLogMessage(message, output.serverMessage)
+             deckPicker.refreshState()
++            com.ichi2.anki.analysis.AnalysisCloud.enqueue(deckPicker)
+             if (syncMedia) {
+                 SyncMediaWorker.start(deckPicker, auth2)
+             }
+@@ -324,6 +325,7 @@ private suspend fun handleDownload(
+             }
+         }
+         deckPicker.refreshState()
++        com.ichi2.anki.analysis.AnalysisCloud.enqueue(deckPicker)
+         if (mediaUsn != null) {
+             SyncMediaWorker.start(deckPicker, auth)
+         }
+@@ -352,6 +354,7 @@ private suspend fun handleUpload(
+             }
+         }
+         deckPicker.refreshState()
++        com.ichi2.anki.analysis.AnalysisCloud.enqueue(deckPicker)
+         if (mediaUsn != null) {
+             SyncMediaWorker.start(deckPicker, auth)
+         }
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
+index 8eb4889..b005684 100644
+--- a/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/ui/windows/reviewer/ReviewerViewModel.kt
+@@ -38,6 +38,7 @@ import com.ichi2.anki.libanki.redo
+ import com.ichi2.anki.libanki.sched.Counts
+ import com.ichi2.anki.libanki.sched.CurrentQueueState
+ import com.ichi2.anki.libanki.sched.Ease
++import com.ichi2.anki.libanki.sched.StudyDiversion
+ import com.ichi2.anki.libanki.undo
+ import com.ichi2.anki.noteeditor.NoteEditorLauncher
+ import com.ichi2.anki.observability.ChangeManager
+@@ -175,6 +176,9 @@ class ReviewerViewModel(
+     fun onShowAnswer() {
+         Timber.v("ReviewerViewModel::onShowAnswer")
+         launchCatchingIO {
++            val id = currentCard.await().id
++            com.ichi2.anki.analysis.StudySessionClock.confirm(id)
++            com.ichi2.anki.analysis.StudySessionClock.touch(id)
+             while (!statesMutated) {
+                 delay(50)
+             }
+@@ -438,6 +442,8 @@ class ReviewerViewModel(
+         launchCatchingIO {
+             val state = queueState.await() ?: return@launchCatchingIO
+             val card = currentCard.await()
++            val previouslyInRepair = StudyDiversion.progress(card.customData)?.inRepair == true
++            com.ichi2.anki.analysis.StudySessionClock.confirm(card.id)
+             val answer =
+                 withCol {
+                     sched.buildAnswer(
+@@ -448,6 +454,7 @@ class ReviewerViewModel(
+                 }
+ 
+             undoableOp { sched.answerCard(answer) }
++            withCol { StudyDiversion.feedback(this, card.id, previouslyInRepair) }?.let { actionFeedbackFlow.emit(it) }
+             answerFeedbackFlow.emit(ease)
+ 
+             val wasLeech = withCol { sched.stateIsLeech(answer.newState) }
+@@ -505,6 +512,7 @@ class ReviewerViewModel(
+         }
+ 
+         val card = state.topCard
++        com.ichi2.anki.analysis.StudySessionClock.touch(card.id)
+         currentCard = CompletableDeferred(card)
+         setupAnswerTimer(card)
+         autoAdvance.onCardChange(card)
+diff --git a/AnkiDroid/src/main/res/menu/deck_picker.xml b/AnkiDroid/src/main/res/menu/deck_picker.xml
+index 3b15230..0c87a6d 100644
+--- a/AnkiDroid/src/main/res/menu/deck_picker.xml
++++ b/AnkiDroid/src/main/res/menu/deck_picker.xml
+@@ -20,6 +20,10 @@
+         ankidroid:showAsAction="never"
+         android:visible="false"
+         tools:title="Undo X"/>
++    <item android:id="@+id/action_study_analysis"
++        android:title="学习分析" ankidroid:showAsAction="never" />
++    <item android:id="@+id/action_diversion_update"
++        android:title="应用更新" ankidroid:showAsAction="never" />
+     <item
+         android:id="@+id/checks"
+         android:title="@string/checks_action"
+diff --git a/AnkiDroid/src/main/res/menu/study_options_fragment.xml b/AnkiDroid/src/main/res/menu/study_options_fragment.xml
+index 862367a..d8e761a 100644
+--- a/AnkiDroid/src/main/res/menu/study_options_fragment.xml
++++ b/AnkiDroid/src/main/res/menu/study_options_fragment.xml
+@@ -33,4 +33,8 @@
+         android:id="@+id/action_unbury"
+         android:title="@string/unbury"
+         android:visibility = "gone"/>
++    <item
++        android:id="@+id/action_study_diversion"
++        android:title="单词分流规则"
++        ankidroid:showAsAction="never"/>
+ </menu>
+diff --git a/common/build.gradle.kts b/common/build.gradle.kts
+index 7fcb4b5..f3480b7 100644
+--- a/common/build.gradle.kts
++++ b/common/build.gradle.kts
+@@ -54,6 +54,7 @@ dependencies {
+     implementation(libs.androidx.appcompat)
+     implementation(libs.google.material)
+     implementation(libs.jakewharton.timber)
++    implementation(libs.kotlinx.serialization.json)
+     testImplementation(libs.junit.jupiter)
+     testImplementation(libs.junit.vintage.engine)
+     testImplementation(libs.hamcrest)
+diff --git a/gradle.properties b/gradle.properties
+index 509de8a..e686e96 100644
+--- a/gradle.properties
++++ b/gradle.properties
+@@ -26,4 +26,9 @@ org.gradle.caching=true
+ org.gradle.configuration-cache.parallel=true
+ 
+ # Enable file system watching (should reduce disk IO and increase incremental build speed).
+-org.gradle.vfs.watch=true
+\ No newline at end of file
++org.gradle.vfs.watch=true
++
++# Keep a broken dependency connection from stalling local verification for minutes.
++systemProp.java.net.preferIPv4Stack=true
++systemProp.org.gradle.internal.http.connectionTimeout=15000
++systemProp.org.gradle.internal.http.socketTimeout=30000
+diff --git a/libanki/src/main/java/com/ichi2/anki/libanki/sched/Scheduler.kt b/libanki/src/main/java/com/ichi2/anki/libanki/sched/Scheduler.kt
+index 83f475b..024c07d 100644
+--- a/libanki/src/main/java/com/ichi2/anki/libanki/sched/Scheduler.kt
++++ b/libanki/src/main/java/com/ichi2/anki/libanki/sched/Scheduler.kt
+@@ -142,7 +142,7 @@ open class Scheduler(
+         info: CurrentQueueState,
+         ease: Ease,
+     ): OpChanges =
+-        col.backend.answerCard(buildAnswer(info.topCard, info.states, ease)).also {
++        answerCard(buildAnswer(info.topCard, info.states, ease)).also {
+             numberOfAnswersRecorded += 1
+         }
+ 
+@@ -153,7 +153,7 @@ open class Scheduler(
+     ) {
+         val top = queuedCards.cardsList.first()
+         val answer = buildAnswer(card, top.states, ease)
+-        col.backend.answerCard(answer)
++        answerCard(answer)
+         numberOfAnswersRecorded += 1
+         // tests assume the card was mutated
+         card.load(col)
+@@ -179,7 +179,7 @@ open class Scheduler(
+ 
+     /** Update card to provided state, and remove it from queue. */
+     @LibAnkiAlias("answer_card")
+-    fun answerCard(input: CardAnswer): OpChanges = col.backend.answerCard(input)
++    fun answerCard(input: CardAnswer): OpChanges = StudyAnalysis.answer(col, input)
+ 
+     private fun ratingFromEase(ease: Ease): CardAnswer.Rating =
+         when (ease) {
+diff --git a/AnkiDroid/src/androidTest/java/com/ichi2/anki/analysis/AnalysisCloudIntegrationTest.kt b/AnkiDroid/src/androidTest/java/com/ichi2/anki/analysis/AnalysisCloudIntegrationTest.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/androidTest/java/com/ichi2/anki/analysis/AnalysisCloudIntegrationTest.kt
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.analysis
++
++import androidx.test.platform.app.InstrumentationRegistry
++import com.ichi2.anki.CollectionManager.withCol
++import com.ichi2.anki.libanki.sched.Ease
++import com.ichi2.anki.libanki.sched.StudyDiversion
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.runBlocking
++import org.junit.Assert.*
++import org.junit.Assume.assumeTrue
++import org.junit.Test
++
++/** Explicit opt-in ECS test using the runner's separate synthetic collection. */
++class AnalysisCloudIntegrationTest {
++    @Test fun uploadAndBackup(): Unit = runBlocking {
++        val args = InstrumentationRegistry.getArguments()
++        val code = args.getString("analysisPairCode")
++        assumeTrue("Requires an explicit disposable pairing code", !code.isNullOrBlank())
++        val context = InstrumentationRegistry.getInstrumentation().targetContext
++        val cardId = withCol {
++            val source = StudyDiversion.settings(this)?.source ?: decks.id("AnalysisIntegrationTest")
++            decks.select(source)
++            if (StudyDiversion.settings(this) == null) StudyDiversion.enable(this, source)
++            val model = notetypes.all().first { it.fieldsNames.size == 2 }
++            val note = newNote(model)
++            note.fields[0] = "integration-word"
++            note.fields[1] = "PRIVATE definition must stay on phone"
++            addNote(note, source)
++            note.cards(this).first().id
++        }
++        AnalysisCloud.pair(context, requireNotNull(code))
++        assertFalse(AnalysisCloud.prefs(context).getString("credential", "")!!.contains(AnalysisCloud.token(context)))
++        val answerAt = System.currentTimeMillis()
++        withCol {
++            val card = getCard(cardId).apply { startTimer() }
++            sched.answerCard(sched.buildAnswer(card, backend.getSchedulingStates(cardId), Ease.AGAIN))
++        }
++        AnalysisCloud.enqueue(context)
++        var uploaded = false
++        repeat(90) {
++            if (AnalysisCloud.prefs(context).getLong("captured", 0) >= answerAt) uploaded = true
++            if (!uploaded) delay(1000)
++        }
++        assertTrue("Upload status: ${AnalysisCloud.prefs(context).getString("status", "")}", uploaded)
++        val snapshot = AnalysisCloud.snapshot(context)
++        assertFalse(snapshot.toString().contains("PRIVATE definition"))
++        assertTrue(snapshot.getJSONArray("reviews").length() > 0)
++        assertTrue(snapshot.getJSONArray("events").length() > 0)
++        val backup = AnalysisBackup.create(context)
++        assertTrue(java.io.File(backup, "complete").isFile)
++        assertTrue(backup.listFiles()!!.any { it.extension == "colpkg" })
++        AnalysisCloud.pause(context)
++        assertFalse(AnalysisCloud.prefs(context).getBoolean("enabled", true))
++    }
++
++    @Test fun deleteTestData(): Unit = runBlocking {
++        assumeTrue(InstrumentationRegistry.getArguments().getString("analysisCleanup") == "true")
++        val context = InstrumentationRegistry.getInstrumentation().targetContext
++        AnalysisCloud.delete(context)
++        assertFalse(AnalysisCloud.prefs(context).contains("credential"))
++        assertFalse(AnalysisCloud.prefs(context).getBoolean("enabled", true))
++    }
++}
+diff --git a/AnkiDroid/src/debug/AndroidManifest.xml b/AnkiDroid/src/debug/AndroidManifest.xml
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/debug/AndroidManifest.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    xmlns:tools="http://schemas.android.com/tools">
++    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:node="remove" />
++    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
++    <application>
++        <activity android:name="com.ichi2.anki.updates.UpdateInstallerActivity"
++            android:exported="false" android:theme="@style/Theme_Light" />
++    </application>
++</manifest>
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisBackup.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisBackup.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisBackup.kt
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.analysis
++
++import android.content.Context
++import com.ichi2.anki.CollectionManager.withCol
++import com.ichi2.anki.reopen
++import com.ichi2.anki.libanki.sched.StudyAnalysis
++import java.io.File
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++
++object AnalysisBackup {
++    /** Native consistent colpkg + private sidecar/settings. No live SQLite file copy. */
++    suspend fun create(context: Context): File = withContext(Dispatchers.IO) {
++        val destination = File(context.filesDir, "analysis-upgrade-backups/${System.currentTimeMillis()}")
++        require(destination.mkdirs()) { "无法创建备份目录" }
++        withCol {
++            val created = createBackup(destination.absolutePath, force = true, waitForCompletion = true)
++            awaitBackupCompletion()
++            // The native backup may skip an unchanged collection even when forced.
++            // Use the same native export path as AnkiDroid's collection export in that case.
++            if (!created) {
++                close(forFullSync = true)
++                try {
++                    backend.exportCollectionPackage(
++                        outPath = File(destination, "collection.colpkg").absolutePath,
++                        includeMedia = false,
++                        legacy = false,
++                    )
++                } finally { reopen() }
++            }
++            require(destination.listFiles()?.any { it.extension == "colpkg" && it.length() > 0 } == true) { "没有找到完整的词库备份" }
++            StudyAnalysis.journal(this).takeIf { it.exists() }?.copyTo(File(destination, StudyAnalysis.JOURNAL))
++            File(colDb.parentFile, StudyAnalysis.SETTINGS).takeIf { it.exists() }?.copyTo(File(destination, StudyAnalysis.SETTINGS))
++        }
++        val prefs = File(context.applicationInfo.dataDir, "shared_prefs")
++        prefs.listFiles()?.filter { it.extension == "xml" }?.forEach { file ->
++            val target = File(destination, "settings/${file.name}")
++            require(target.parentFile!!.mkdirs() || target.parentFile!!.isDirectory)
++            file.copyTo(target)
++            // SharedPreferences.apply() may not have flushed its XML yet. Keep an API snapshot too.
++            val values = context.getSharedPreferences(file.nameWithoutExtension, Context.MODE_PRIVATE).all
++            File(destination, "settings/${file.nameWithoutExtension}.json").writeText(org.json.JSONObject(values).toString())
++        }
++        File(destination, "README.txt").writeText("词库：使用 AnkiDroid 恢复 colpkg。分析记录：同名 JSONL 位于词库目录。settings 是本机设置副本，包含私人凭据，请勿公开分享。未复制媒体。\n")
++        File(destination, "complete").writeText("backup completed\n")
++        destination
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisCloud.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisCloud.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/AnalysisCloud.kt
+@@ -0,0 +1,202 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.analysis
++
++import android.content.Context
++import android.security.keystore.KeyGenParameterSpec
++import android.security.keystore.KeyProperties
++import android.util.Base64
++import androidx.work.BackoffPolicy
++import androidx.work.Constraints
++import androidx.work.CoroutineWorker
++import androidx.work.ExistingPeriodicWorkPolicy
++import androidx.work.ExistingWorkPolicy
++import androidx.work.NetworkType
++import androidx.work.OneTimeWorkRequestBuilder
++import androidx.work.PeriodicWorkRequestBuilder
++import androidx.work.WorkManager
++import androidx.work.WorkerParameters
++import com.ichi2.anki.CollectionManager.withCol
++import com.ichi2.anki.libanki.sched.StudyAnalysis
++import java.io.ByteArrayOutputStream
++import java.io.IOException
++import java.security.KeyStore
++import java.security.MessageDigest
++import java.util.concurrent.TimeUnit
++import java.util.zip.GZIPOutputStream
++import javax.crypto.Cipher
++import javax.crypto.KeyGenerator
++import javax.crypto.SecretKey
++import javax.crypto.spec.GCMParameterSpec
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++import okhttp3.MediaType.Companion.toMediaType
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.RequestBody.Companion.toRequestBody
++import org.json.JSONObject
++
++object AnalysisCloud {
++    const val BASE = "https://47-109-157-25.sslip.io/anki-analysis/"
++    private val origins = listOf(BASE, "https://kailang.online/anki-analysis/")
++    const val WORK = "private-study-snapshot"
++    private const val PERIODIC = "private-study-supplementary"
++    private const val KEY = "private-study-credential-v1"
++    private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS)
++        .readTimeout(90, TimeUnit.SECONDS).callTimeout(120, TimeUnit.SECONDS)
++        .followRedirects(false).followSslRedirects(false).build()
++    fun prefs(context: Context) = context.getSharedPreferences("private_study", Context.MODE_PRIVATE)
++
++    private fun key(): SecretKey {
++        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
++        (store.getKey(KEY, null) as? SecretKey)?.let { return it }
++        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
++            init(KeyGenParameterSpec.Builder(KEY, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
++                .setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build())
++        }.generateKey()
++    }
++
++    private fun saveToken(context: Context, token: String) {
++        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key()) }
++        val encrypted = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
++        check(prefs(context).edit().putString("credential", Base64.encodeToString(cipher.iv + encrypted, Base64.NO_WRAP)).commit())
++    }
++
++    fun token(context: Context): String {
++        val data = Base64.decode(requireNotNull(prefs(context).getString("credential", null)), Base64.NO_WRAP)
++        return Cipher.getInstance("AES/GCM/NoPadding").run {
++            init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, data.copyOfRange(0, 12)))
++            String(doFinal(data.copyOfRange(12, data.size)), Charsets.UTF_8)
++        }
++    }
++
++    fun fields(context: Context): Map<Long, String> {
++        val json = JSONObject(prefs(context).getString("word_fields", "{}")!!)
++        return json.keys().asSequence().associate { it.toLong() to json.getString(it) }
++    }
++
++    suspend fun snapshot(context: Context): JSONObject {
++        val fields = fields(context)
++        val prefs = prefs(context)
++        val authorized = if (prefs.contains("credential")) prefs.getStringSet("authorized_decks", null)?.map { it.toLong() }?.toSet() else null
++        return withCol {
++            val settings = requireNotNull(com.ichi2.anki.libanki.sched.StudyDiversion.settings(this)) { "请先启用单词分流规则" }
++            val identity = collectionIdentity(db.queryLongScalar("select crt from col"), settings.epoch, settings.source)
++            StudyAnalysis.snapshot(this, identity, fields, authorizedDeckIds = authorized)
++        }
++    }
++
++    private fun collectionIdentity(created: Long, epoch: Long, source: Long): String = MessageDigest.getInstance("SHA-256")
++        .digest("$created/$epoch/$source".toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
++
++    private fun request(path: String, method: String, body: ByteArray? = null, token: String? = null, gzip: Boolean = false): Pair<Int, JSONObject> {
++        var failure: IOException? = null
++        for (origin in origins) {
++            try {
++                val request = Request.Builder().url(origin + path)
++                    .apply { if (token != null) header("Authorization", "Bearer $token") }
++                    .apply { if (gzip) header("Content-Encoding", "gzip") }
++                    .method(method, body?.toRequestBody("application/json".toMediaType())).build()
++                client.newCall(request).execute().use { response ->
++                    if (response.code >= 500) throw IOException("分析服务暂不可用（${response.code}）")
++                    val text = response.body.string()
++                    require(text.length <= 64 * 1024) { "服务返回内容异常" }
++                    val json = runCatching { JSONObject(text) }.getOrElse { JSONObject().put("error", "分析服务暂不可用（${response.code}）") }
++                    return response.code to json
++                }
++            } catch (error: IOException) { failure = error }
++        }
++        throw IOException("私人云端暂时无法连接，请稍后重试", failure)
++    }
++
++    suspend fun pair(context: Context, code: String) = withContext(Dispatchers.IO) {
++        val preview = snapshot(context)
++        val (status, json) = request("v1/pair", "POST", JSONObject().put("code", code.trim()).toString().toByteArray(Charsets.UTF_8))
++        require(status == 200) { json.optString("error", "授权失败") }
++        saveToken(context, json.getString("uploadToken"))
++        val identity = withCol {
++            StudyAnalysis.enable(this)
++            val settings = requireNotNull(com.ichi2.anki.libanki.sched.StudyDiversion.settings(this))
++            collectionIdentity(db.queryLongScalar("select crt from col"), settings.epoch, settings.source)
++        }
++        check(prefs(context).edit().putString("device", json.getString("deviceId"))
++            .putString("collection", identity).putLong("sequence", 0).putBoolean("enabled", true)
++            .putStringSet("authorized_decks", preview.getJSONArray("scopeDeckIds").let { ids -> (0 until ids.length()).map { ids.getLong(it).toString() }.toSet() }).commit())
++        enqueue(context)
++    }
++
++    fun enqueue(context: Context) {
++        if (!prefs(context).getBoolean("enabled", false)) return
++        prefs(context).edit().putString("status", "等待上传，允许使用手机流量或 Wi-Fi").apply()
++        val job = OneTimeWorkRequestBuilder<AnalysisUploadWorker>()
++            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
++            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS).build()
++        WorkManager.getInstance(context).enqueueUniqueWork(WORK, ExistingWorkPolicy.APPEND_OR_REPLACE, job)
++        val periodic = PeriodicWorkRequestBuilder<AnalysisUploadWorker>(6, TimeUnit.HOURS)
++            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build()
++        WorkManager.getInstance(context).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, periodic)
++    }
++
++    fun pause(context: Context) {
++        prefs(context).edit().putBoolean("enabled", false).putString("status", "已暂停上传，云端历史保留").apply()
++        WorkManager.getInstance(context).cancelUniqueWork(WORK)
++        WorkManager.getInstance(context).cancelUniqueWork(PERIODIC)
++    }
++
++    suspend fun delete(context: Context) = withContext(Dispatchers.IO) {
++        pause(context)
++        val (status, json) = request("v1/snapshot", "DELETE", token = token(context))
++        require(status == 200) { json.optString("error", "删除失败，请重试") }
++        prefs(context).edit().remove("credential").remove("device").putString("status", "云端分析数据已删除，设备授权已撤销").commit()
++    }
++
++    suspend fun upload(context: Context): Boolean = withContext(Dispatchers.IO) {
++        val prefs = prefs(context)
++        if (!prefs.getBoolean("enabled", false)) return@withContext true
++        val token = try { token(context) } catch (_: Exception) {
++            pause(context)
++            prefs.edit().remove("credential").putString("status", "无法恢复设备凭据，请重新授权").apply()
++            return@withContext true
++        }
++        prefs.edit().putString("status", "正在准备分析数据").apply()
++        val snapshot = snapshot(context)
++        require(snapshot.getString("collectionId") == prefs.getString("collection", null)) { "当前词库与授权时不同，请重新授权" }
++        val sequence = prefs.getLong("sequence", 0) + 1
++        check(prefs.edit().putLong("sequence", sequence).commit())
++        val data = JSONObject().put("sequence", sequence).put("snapshot", snapshot).toString().toByteArray(Charsets.UTF_8)
++        require(data.size <= 32 * 1024 * 1024) { "分析历史超过首版上限，请保留数据并联系检查" }
++        val output = ByteArrayOutputStream()
++        GZIPOutputStream(output).use { it.write(data) }
++        if (!prefs.getBoolean("enabled", false)) return@withContext true
++        prefs.edit().putString("status", "正在上传，AnkiWeb 同步单独显示结果").apply()
++        val (status, json) = request("v1/snapshot", "POST", output.toByteArray(), token, gzip = true)
++        if (status == 409 && json.has("sequence")) {
++            prefs.edit().putLong("sequence", maxOf(sequence, json.getLong("sequence"))).commit()
++            return@withContext false
++        }
++        if (status == 401) {
++            pause(context)
++            prefs.edit().remove("credential").putString("status", "授权已失效，请重新授权").apply()
++            return@withContext true
++        }
++        require(status == 200 && json.getLong("sequence") == sequence) { json.optString("error", "上传未成功（$status）") }
++        prefs.edit().putLong("last_upload", System.currentTimeMillis()).putLong("captured", snapshot.getLong("capturedAt"))
++            .putString("status", "上传成功：${snapshot.getJSONArray("cards").length()} 张卡片，${snapshot.getJSONArray("reviews").length()} 条作答")
++            .putInt("bytes", output.size()).apply()
++        true
++    }
++}
++
++class AnalysisUploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
++    override suspend fun doWork(): Result = try {
++        // Periodic and one-shot work share the same mutex, so snapshots never race.
++        uploadLock.lock()
++        try { if (AnalysisCloud.upload(applicationContext)) Result.success() else Result.retry() }
++        finally { uploadLock.unlock() }
++    } catch (cancelled: kotlinx.coroutines.CancellationException) {
++        throw cancelled
++    } catch (error: Exception) {
++        AnalysisCloud.prefs(applicationContext).edit().putString("status", "待重试：${error.message?.take(150) ?: "网络暂不可用"}").apply()
++        Result.retry()
++    }
++    companion object { private val uploadLock = kotlinx.coroutines.sync.Mutex() }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudyAnalysisUi.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudyAnalysisUi.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudyAnalysisUi.kt
+@@ -0,0 +1,179 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.analysis
++
++import android.content.Context
++import android.widget.EditText
++import android.widget.ScrollView
++import android.widget.TextView
++import android.widget.Toast
++import androidx.fragment.app.FragmentActivity
++import androidx.lifecycle.lifecycleScope
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.ichi2.anki.CollectionManager.withCol
++import com.ichi2.anki.libanki.sched.StudyAnalysis
++import java.text.DateFormat
++import java.util.Calendar
++import java.util.Date
++import kotlinx.coroutines.launch
++import org.json.JSONObject
++
++object StudyAnalysisUi {
++    private fun text(activity: FragmentActivity, title: String, message: String) {
++        val content = TextView(activity).apply { text = message; setPadding(32, 20, 32, 20); textSize = 16f; setTextIsSelectable(true) }
++        MaterialAlertDialogBuilder(activity).setTitle(title).setView(ScrollView(activity).apply { addView(content) })
++            .setPositiveButton("关闭", null).show()
++    }
++
++    fun show(activity: FragmentActivity) {
++        MaterialAlertDialogBuilder(activity).setTitle("学习分析")
++            .setItems(arrayOf("今日用时、负担与修复", "云端同步与授权", "选择单词字段", "创建本地备份")) { _, index ->
++                when (index) {
++                    0 -> overview(activity)
++                    1 -> cloud(activity)
++                    2 -> chooseFields(activity)
++                    3 -> activity.lifecycleScope.launch {
++                        runCatching { AnalysisBackup.create(activity) }
++                            .onSuccess { text(activity, "备份完成", "已保存词库、分流进度、分析记录和设置，不重复复制媒体。\n\n${it.absolutePath}") }
++                            .onFailure { text(activity, "备份未完成", it.message ?: "请检查存储空间后重试") }
++                    }
++                }
++            }.setNegativeButton("关闭", null).show()
++    }
++
++    private fun overview(activity: FragmentActivity) {
++        activity.lifecycleScope.launch {
++            try {
++                val s = AnalysisCloud.snapshot(activity)
++                val cutoff = s.getLong("nextDayAt") * 1000
++                val start = Calendar.getInstance().apply { timeInMillis = cutoff; add(Calendar.DATE, -1) }.timeInMillis
++                val events = s.getJSONArray("events")
++                val interrupted = (0 until events.length()).map { events.getJSONObject(it) }
++                    .filter { it.getBoolean("interrupted") }.map { it.getLong("reviewId") }.toSet()
++                val reviews = s.getJSONArray("reviews")
++                var answers = 0; var again = 0; var raw = 0L; var filtered = 0L; var excluded = 0
++                val distinct = hashSetOf<Long>()
++                for (i in 0 until reviews.length()) {
++                    val r = reviews.getJSONObject(i)
++                    if (r.getLong("id") !in start until cutoff || r.getInt("ease") !in 1..4 || r.getInt("type") !in 0..2) continue
++                    answers++; if (r.getInt("ease") == 1) again++
++                    raw += r.getLong("timeMs"); distinct.add(r.getLong("cardId"))
++                    if (r.getLong("id") in interrupted) excluded++ else filtered += r.getLong("timeMs")
++                }
++                val words = mutableMapOf<Long, String>()
++                val notes = s.getJSONArray("notes")
++                for (i in 0 until notes.length()) notes.getJSONObject(i).let { words[it.getLong("id")] = it.getString("word") }
++                val cards = s.getJSONArray("cards")
++                val repairs = mutableListOf<String>()
++                var due = 0
++                val future = IntArray(7)
++                val today = s.getInt("dayIndex")
++                for (i in 0 until cards.length()) {
++                    val c = cards.getJSONObject(i)
++                    c.optJSONObject("diversion")?.takeIf { it.getLong("home") != 0L }?.let {
++                        repairs.add("${words[c.getLong("noteId")]?.ifBlank { "未设置单词字段" }}：Easy ${it.getInt("easy")}/5，本轮 Again ${it.getInt("repairAgain")}")
++                    }
++                    if (c.optLong("originalDeckId") != 0L) continue
++                    val queue = c.getInt("queue"); val deadline = c.getLong("due")
++                    if (queue in 1..3 && deadline <= if (queue == 1) System.currentTimeMillis() / 1000 else today.toLong()) due++
++                    if (queue == 2 || queue == 3) {
++                        val offset = (deadline - today).toInt()
++                        if (offset in 1..7) future[offset - 1]++
++                    }
++                }
++                val date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
++                val message = buildString {
++                    append("学习日：${date.format(Date(start))} 至 ${date.format(Date(cutoff))}\n\n")
++                    append("作答 $answers 次，涉及 ${distinct.size} 张卡片\nAgain $again 次\n")
++                    append("Anki 记录用时：${"%.1f".format(raw / 60000.0)} 分钟\n")
++                    append("排除已确认中断后：${"%.1f".format(filtered / 60000.0)} 分钟\n排除中断：$excluded 次（评分和次数保留）\n\n")
++                    append("当前到期：$due 张\n未来 7 天已排程：${future.joinToString(" / ")}\n以上不包含未来新增学习和后续重排。\n\n")
++                    append("修复组：${repairs.size} 张\n${repairs.take(30).joinToString("\n")}\n\n")
++                    append("云端：${AnalysisCloud.prefs(activity).getString("status", "尚未授权上传")}\n\n")
++                    val warnings = s.getJSONArray("warnings")
++                    for (i in 0 until warnings.length()) append("${warnings.getString(i)}\n")
++                }
++                text(activity, "今日与单词修复", message)
++            } catch (error: Exception) { text(activity, "暂时无法读取", error.message ?: "请先启用单词分流规则") }
++        }
++    }
++
++    private fun cloud(activity: FragmentActivity) {
++        val prefs = AnalysisCloud.prefs(activity)
++        val enabled = prefs.getBoolean("enabled", false)
++        val last = prefs.getLong("captured", 0)
++        val timestamp = if (last == 0L) "尚未上传" else DateFormat.getDateTimeInstance().format(Date(last))
++        MaterialAlertDialogBuilder(activity).setTitle("私人云端分析")
++            .setMessage("${prefs.getString("status", "尚未授权")}\n数据截至：$timestamp\n\n允许手机流量和 Wi-Fi。原同步按钮与背词结束后都会安排上传；AnkiWeb 的同步结果单独显示。上传后不会自动调用 AI。\n\n只上传主词组与关联修复卡片的单词、牌组、作答和修复进度，默认不传释义、例句或媒体。未选择的单词字段留空。")
++            .setPositiveButton(if (enabled) "立即上传" else "授权或恢复") { _, _ ->
++                if (enabled) AnalysisCloud.enqueue(activity)
++                else if (prefs.contains("credential")) {
++                    prefs.edit().putBoolean("enabled", true).apply(); AnalysisCloud.enqueue(activity)
++                } else consent(activity)
++            }.setNeutralButton(if (enabled) "暂停上传" else "删除云端数据") { _, _ ->
++                if (enabled) AnalysisCloud.pause(activity) else confirmDelete(activity)
++            }.setNegativeButton("关闭", null).show()
++    }
++
++    private fun consent(activity: FragmentActivity) {
++        activity.lifecycleScope.launch {
++            try {
++                val s = AnalysisCloud.snapshot(activity)
++                val names = s.getJSONArray("decks")
++                val preview = s.getJSONArray("notes")
++                val sample = (0 until preview.length()).asSequence().map { preview.getJSONObject(it).getString("word") }
++                    .filter { it.isNotBlank() }.take(5).joinToString("、")
++                MaterialAlertDialogBuilder(activity).setTitle("授权上传学习分析")
++                    .setMessage("范围：${(0 until names.length()).joinToString("、") { names.getJSONObject(it).getString("name") }}\n\n单词预览：$sample\n\n上传单词、牌组、作答记录、修复进度及中断标记。释义、例句、图片、音频默认排除。未映射字段的卡片只传作答，不传正文。\n\n${s.getJSONArray("warnings").join("\n")}\n\n可随时暂停并保留云端历史；删除是独立操作。请选择正确单词字段后再授权。")
++                    .setPositiveButton("同意并输入授权码") { _, _ -> pair(activity) }
++                    .setNeutralButton("先选单词字段") { _, _ -> chooseFields(activity) }
++                    .setNegativeButton("暂不上传", null).show()
++            } catch (error: Exception) { text(activity, "无法准备授权", error.message ?: "请先启用分流规则") }
++        }
++    }
++
++    private fun pair(activity: FragmentActivity) {
++        val input = EditText(activity).apply { hint = "输入一次性授权码"; isSingleLine = true }
++        MaterialAlertDialogBuilder(activity).setTitle("连接私人云端").setView(input)
++            .setPositiveButton("连接") { _, _ -> activity.lifecycleScope.launch {
++                try { AnalysisCloud.pair(activity, input.text.toString()); Toast.makeText(activity, "授权成功，已安排上传", Toast.LENGTH_LONG).show() }
++                catch (error: Exception) { text(activity, "连接未成功", error.message ?: "请检查授权码和网络") }
++            } }.setNegativeButton("取消", null).show()
++    }
++
++    private fun confirmDelete(activity: FragmentActivity) {
++        MaterialAlertDialogBuilder(activity).setTitle("删除云端分析数据？")
++            .setMessage("删除本设备上传的分析副本并撤销上传授权。手机词库和 AnkiWeb 数据保留；以后上传需要新的授权码。")
++            .setPositiveButton("删除云端副本") { _, _ -> activity.lifecycleScope.launch {
++                try { AnalysisCloud.delete(activity); cloud(activity) }
++                catch (error: Exception) { text(activity, "删除尚未成功", error.message ?: "请重试") }
++            } }.setNegativeButton("取消", null).show()
++    }
++
++    private fun chooseFields(activity: FragmentActivity) {
++        activity.lifecycleScope.launch {
++            val models = withCol { notetypes.all().map { Triple(it.id, it.name, it.fieldsNames) } }
++            MaterialAlertDialogBuilder(activity).setTitle("选择需要设置的卡片类型")
++                .setItems(models.map { it.second }.toTypedArray()) { _, modelIndex ->
++                    val model = models[modelIndex]
++                    MaterialAlertDialogBuilder(activity).setTitle("${model.second}：单词在哪个字段？")
++                        .setItems(model.third.toTypedArray()) { _, fieldIndex ->
++                            val field = model.third[fieldIndex]
++                            activity.lifecycleScope.launch {
++                                try {
++                                    val fields = withCol { db.queryString("select flds from notes where mid=? limit 1", model.first).split('\u001f') }
++                                    val sample = fields.getOrNull(fieldIndex)?.let { StudyAnalysis.wordText(it) } ?: "无样本"
++                                    MaterialAlertDialogBuilder(activity).setTitle("核对单词字段")
++                                        .setMessage("${model.second} → $field\n\n内容预览：\n${sample.take(600)}\n\n只有这个字段用于单词文字。请确认它是单词或短语；不要选择例句、释义或媒体字段。")
++                                        .setPositiveButton("确认是单词字段") { _, _ ->
++                                            val prefs = AnalysisCloud.prefs(activity)
++                                            val mapping = JSONObject(prefs.getString("word_fields", "{}")!!).put(model.first.toString(), field)
++                                            prefs.edit().putString("word_fields", mapping.toString()).apply()
++                                            Toast.makeText(activity, "已保存，之后的上传使用这个字段", Toast.LENGTH_LONG).show()
++                                        }.setNegativeButton("取消", null).show()
++                                } catch (error: Exception) { text(activity, "无法预览", error.message ?: "此类型没有卡片") }
++                            }
++                        }.setNegativeButton("取消", null).show()
++                }.setNegativeButton("关闭", null).show()
++        }
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudySessionClock.kt b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudySessionClock.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/analysis/StudySessionClock.kt
+@@ -0,0 +1,71 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.analysis
++
++import android.os.SystemClock
++import androidx.fragment.app.FragmentActivity
++import androidx.lifecycle.lifecycleScope
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.ichi2.anki.CollectionManager.withCol
++import com.ichi2.anki.libanki.sched.StudyAnalysis
++import java.lang.ref.WeakReference
++import kotlin.coroutines.resume
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.suspendCancellableCoroutine
++import kotlinx.coroutines.withContext
++import kotlinx.coroutines.launch
++
++object StudySessionClock {
++    private val confirmation = kotlinx.coroutines.sync.Mutex()
++    private var activity = WeakReference<FragmentActivity>(null)
++    private var card = 0L
++    private var touched = SystemClock.elapsedRealtime()
++    private var pausedAt = 0L
++    private var asking = false
++
++    fun attach(value: FragmentActivity) {
++        activity = WeakReference(value)
++        if (pausedAt != 0L) { touched += SystemClock.elapsedRealtime() - pausedAt; pausedAt = 0 }
++    }
++    fun pause(value: FragmentActivity) {
++        if (activity.get() === value && pausedAt == 0L) pausedAt = SystemClock.elapsedRealtime()
++    }
++    fun touch(id: Long) {
++        if (card != id) StudyAnalysis.interruptedCard = 0
++        card = id; touched = SystemClock.elapsedRealtime(); pausedAt = 0
++    }
++
++    fun deferIfNeeded(current: FragmentActivity, id: Long, action: () -> Unit): Boolean {
++        if (asking) return true
++        if (card != id || SystemClock.elapsedRealtime() - touched < 120_000) { touch(id); return false }
++        asking = true
++        current.lifecycleScope.launch {
++            try { confirm(id); touch(id); asking = false; action() } finally { asking = false }
++        }
++        return true
++    }
++
++    suspend fun confirm(id: Long) {
++        confirmation.lock()
++        try { confirmOnce(id) } finally { confirmation.unlock() }
++    }
++
++    private suspend fun confirmOnce(id: Long) {
++        if (card != id || SystemClock.elapsedRealtime() - touched < 120_000) return
++        if (withCol { StudyAnalysis.enabledAt(this) == 0L }) return
++        withContext(Dispatchers.Main) {
++            val current = activity.get() ?: return@withContext
++            if (current.isFinishing || current.isDestroyed) return@withContext
++            suspendCancellableCoroutine<Unit> { continuation ->
++                val dialog = MaterialAlertDialogBuilder(current).setTitle("刚才被事情打断了吗？")
++                    .setMessage("这张卡片停留较久。若被打断，本次评分和 Again 次数照常保留，用时会从筛选后的统计中排除。")
++                    .setPositiveButton("被打断了") { _, _ ->
++                        StudyAnalysis.interruptedCard = id
++                        if (continuation.isActive) continuation.resume(Unit)
++                    }.setNegativeButton("一直在思考") { _, _ -> if (continuation.isActive) continuation.resume(Unit) }
++                    .setCancelable(false).show()
++                continuation.invokeOnCancellation { current.runOnUiThread { dialog.dismiss() } }
++            }
++            touched = SystemClock.elapsedRealtime()
++        }
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdateWorker.kt b/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdateWorker.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdateWorker.kt
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.updates
++
++import android.annotation.SuppressLint
++import android.content.Context
++import android.content.pm.ServiceInfo
++import android.os.Build
++import androidx.core.app.NotificationManagerCompat
++import androidx.work.CoroutineWorker
++import androidx.work.ForegroundInfo
++import androidx.work.WorkerParameters
++import com.ichi2.anki.BuildConfig
++import com.ichi2.anki.utils.ext.trySetForeground
++import com.ichi2.utils.Permissions
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++import java.io.IOException
++import timber.log.Timber
++
++class AppUpdateWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
++    companion object { private val downloadLock = Mutex() }
++
++    @SuppressLint("MissingPermission")
++    override suspend fun doWork(): Result = downloadLock.withLock {
++        val context = applicationContext
++        val manual = inputData.getBoolean("manual", false)
++        if (!manual && !AppUpdater.prefs(context).getBoolean("automatic", true)) return@withLock Result.success()
++        try {
++            val release = withContext(Dispatchers.IO) { AppUpdater.fetchRelease(context) }
++            AppUpdater.prefs(context).edit().putLong("last_check", System.currentTimeMillis()).apply()
++            if (release.versionCode <= BuildConfig.VERSION_CODE) return@withLock Result.success()
++            trySetForeground(getForegroundInfo())
++            AppUpdater.download(context, release) { percent ->
++                if (Permissions.canPostNotifications(context)) {
++                    val notification = AppUpdater.notification(context, "正在下载应用更新", "${release.versionName} · $percent%")
++                        .setOngoing(true).setProgress(100, percent, false).build()
++                    NotificationManagerCompat.from(context).notify(AppUpdater.PROGRESS_ID, notification)
++                }
++            }
++            AppUpdater.notifyReady(context, release)
++            Result.success()
++        } catch (cancelled: CancellationException) {
++            throw cancelled
++        } catch (error: Exception) {
++            Timber.w(error, "App update download failed")
++            if (manual && Permissions.canPostNotifications(context)) {
++                val message = if (error is IOException) "请检查网络后在“应用更新”中重试" else "安装包未通过检查，已停止更新"
++                NotificationManagerCompat.from(context).notify(AppUpdater.READY_ID,
++                    AppUpdater.notification(context, "更新暂未完成", message).setAutoCancel(true).build())
++            }
++            if (error is IOException && runAttemptCount < 3) Result.retry() else Result.failure()
++        } finally {
++            NotificationManagerCompat.from(context).cancel(AppUpdater.PROGRESS_ID)
++        }
++    }
++
++    override suspend fun getForegroundInfo(): ForegroundInfo {
++        val notification = AppUpdater.notification(applicationContext, "正在准备应用更新", "更新将保留现有学习数据")
++            .setOngoing(true).setProgress(0, 0, true).build()
++        return if (Build.VERSION.SDK_INT >= 29) ForegroundInfo(AppUpdater.PROGRESS_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
++        else ForegroundInfo(AppUpdater.PROGRESS_ID, notification)
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdater.kt b/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdater.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/updates/AppUpdater.kt
+@@ -0,0 +1,271 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.updates
++
++import android.annotation.SuppressLint
++import android.app.NotificationChannel
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Context
++import android.content.Intent
++import android.content.pm.PackageInfo
++import android.content.pm.PackageManager
++import android.os.Build
++import android.widget.Toast
++import androidx.core.app.NotificationCompat
++import androidx.core.app.NotificationManagerCompat
++import androidx.fragment.app.FragmentActivity
++import androidx.lifecycle.lifecycleScope
++import androidx.work.Constraints
++import androidx.work.ExistingPeriodicWorkPolicy
++import androidx.work.ExistingWorkPolicy
++import androidx.work.NetworkType
++import androidx.work.OneTimeWorkRequestBuilder
++import androidx.work.PeriodicWorkRequestBuilder
++import androidx.work.WorkManager
++import androidx.work.workDataOf
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.ichi2.anki.BuildConfig
++import com.ichi2.anki.R
++import com.ichi2.anki.common.updates.UpdateArtifact
++import com.ichi2.anki.common.updates.UpdateRelease
++import com.ichi2.utils.Permissions
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.ensureActive
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import java.io.ByteArrayOutputStream
++import java.io.File
++import java.io.FileOutputStream
++import java.io.IOException
++import java.security.MessageDigest
++import java.util.concurrent.TimeUnit
++import kotlin.coroutines.coroutineContext
++import timber.log.Timber
++
++object AppUpdater {
++    const val CHANNEL = "diversion_updates"
++    const val READY_ID = 15725301
++    const val PROGRESS_ID = 15725302
++    private const val PERIODIC = "diversion-update-daily"
++    private const val DOWNLOAD = "diversion-update-download"
++    private var checking = false
++    private val client = OkHttpClient.Builder()
++        .connectTimeout(20, TimeUnit.SECONDS)
++        .readTimeout(45, TimeUnit.SECONDS)
++        .callTimeout(9, TimeUnit.MINUTES)
++        .followRedirects(false)
++        .followSslRedirects(false)
++        .build()
++
++    fun prefs(context: Context) = context.getSharedPreferences("diversion_updates", Context.MODE_PRIVATE)
++
++    fun onResume(activity: FragmentActivity) {
++        if (BuildConfig.APPLICATION_ID != UpdateRelease.PACKAGE_NAME) return
++        schedule(activity)
++        if (!prefs(activity).getBoolean("automatic", true) || checking) return
++        val last = prefs(activity).getLong("last_check", 0)
++        if (System.currentTimeMillis() - last < TimeUnit.HOURS.toMillis(6)) return
++        check(activity, manual = false)
++    }
++
++    fun schedule(context: Context) {
++        val manager = WorkManager.getInstance(context)
++        if (!prefs(context).getBoolean("automatic", true)) {
++            manager.cancelUniqueWork(PERIODIC)
++            return
++        }
++        val job = PeriodicWorkRequestBuilder<AppUpdateWorker>(24, TimeUnit.HOURS)
++            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
++            .setInitialDelay(15, TimeUnit.MINUTES)
++            .build()
++        manager.enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, job)
++    }
++
++    fun showSettings(activity: FragmentActivity) {
++        val enabled = prefs(activity).getBoolean("automatic", true)
++        MaterialAlertDialogBuilder(activity)
++            .setTitle("应用更新")
++            .setMessage("当前版本：${BuildConfig.VERSION_NAME}\n\n自动更新：${if (enabled) "已开启" else "已关闭"}\n开启后每天检查，连接 Wi-Fi 时自动下载。下载完成后点通知，并在系统页面确认安装。\n\n更新保留词库、学习记录和分流计数；此功能只下载应用文件。")
++            .setPositiveButton("检查更新") { _, _ -> check(activity, manual = true) }
++            .setNeutralButton(if (enabled) "关闭自动下载" else "开启自动下载") { _, _ ->
++                prefs(activity).edit().putBoolean("automatic", !enabled).apply()
++                schedule(activity)
++                if (enabled) WorkManager.getInstance(activity).cancelUniqueWork(DOWNLOAD)
++                Toast.makeText(activity, if (enabled) "已关闭自动更新" else "已开启 Wi-Fi 自动下载", Toast.LENGTH_LONG).show()
++            }.setNegativeButton("关闭", null).show()
++    }
++
++    private fun check(activity: FragmentActivity, manual: Boolean) {
++        if (checking) return
++        checking = true
++        activity.lifecycleScope.launch {
++            val waiting = if (manual) MaterialAlertDialogBuilder(activity).setMessage("正在检查更新…").setCancelable(false).show() else null
++            try {
++                val release = withContext(Dispatchers.IO) { fetchRelease(activity) }
++                prefs(activity).edit().putLong("last_check", System.currentTimeMillis()).apply()
++                waiting?.dismiss()
++                if (release.versionCode <= BuildConfig.VERSION_CODE) {
++                    if (manual) Toast.makeText(activity, "当前已是最新版本", Toast.LENGTH_LONG).show()
++                } else if (manual) {
++                    val cached = file(activity, release, release.artifactFor(Build.SUPPORTED_ABIS.toList())).isFile
++                    MaterialAlertDialogBuilder(activity)
++                        .setTitle("发现新版本 ${release.versionName}")
++                        .setMessage("${release.notes}\n\n下载约 ${release.artifactFor(Build.SUPPORTED_ABIS.toList()).bytes / 1024 / 1024} MB，保留现有学习数据。点“下载更新”允许使用当前网络；安装仍需你确认。")
++                        .setPositiveButton(if (cached) "安装更新" else "下载更新") { _, _ ->
++                            if (cached) activity.startActivity(Intent(activity, UpdateInstallerActivity::class.java).putExtra("version", release.versionCode))
++                            else enqueue(activity, allowMetered = true)
++                        }
++                        .setNegativeButton("稍后", null).show()
++                } else {
++                    enqueue(activity, allowMetered = false)
++                }
++            } catch (error: kotlinx.coroutines.CancellationException) {
++                throw error
++            } catch (error: Exception) {
++                Timber.w(error, "App update check failed")
++                if (manual && !activity.isFinishing) MaterialAlertDialogBuilder(activity)
++                    .setTitle("暂时无法检查更新")
++                    .setMessage("请确认网络可用后重试，现有背词和同步功能不受影响。")
++                    .setPositiveButton("知道了", null).show()
++            } finally {
++                waiting?.dismiss()
++                checking = false
++            }
++        }
++    }
++
++    fun enqueue(context: Context, allowMetered: Boolean) {
++        val request = OneTimeWorkRequestBuilder<AppUpdateWorker>()
++            .setInputData(workDataOf("manual" to allowMetered))
++            .setConstraints(Constraints.Builder().setRequiredNetworkType(if (allowMetered) NetworkType.CONNECTED else NetworkType.UNMETERED).build())
++            .build()
++        WorkManager.getInstance(context).enqueueUniqueWork(DOWNLOAD, ExistingWorkPolicy.REPLACE, request)
++        Toast.makeText(context, if (allowMetered) "开始下载，完成后会通知你安装" else "已安排在 Wi-Fi 下下载更新", Toast.LENGTH_LONG).show()
++    }
++
++    fun fetchRelease(context: Context): UpdateRelease {
++        val preferred = prefs(context).getString("origin", UpdateRelease.BASE_URL)
++        val origins = UpdateRelease.TRUSTED_ORIGINS.sortedBy { if (it == preferred) 0 else 1 }
++        var lastError: Exception? = null
++        for (origin in origins) {
++            try {
++                val request = Request.Builder().url(origin + "latest.json").header("Cache-Control", "no-cache").build()
++                client.newBuilder().callTimeout(30, TimeUnit.SECONDS).build().newCall(request).execute().use { response ->
++                    if (response.code != 200) throw IOException("更新服务暂不可用")
++                    val bytes = ByteArrayOutputStream()
++                    response.body.byteStream().use { stream ->
++                        val buffer = ByteArray(4096)
++                        while (true) {
++                            val count = stream.read(buffer)
++                            if (count < 0) break
++                            require(bytes.size() + count <= UpdateRelease.MAX_MANIFEST_BYTES) { "更新说明过大" }
++                            bytes.write(buffer, 0, count)
++                        }
++                    }
++                    val release = UpdateRelease.parse(bytes.toString("UTF-8"))
++                    prefs(context).edit().putString("origin", origin).apply()
++                    return release
++                }
++            } catch (error: Exception) {
++                lastError = error
++            }
++        }
++        throw IOException("更新服务暂不可用", lastError)
++    }
++
++    fun file(context: Context, release: UpdateRelease, artifact: UpdateArtifact): File =
++        File(File(context.cacheDir, "updates").apply { mkdirs() }, "${release.versionCode}-${artifact.sha256.take(12)}.apk")
++
++    suspend fun download(context: Context, release: UpdateRelease, progress: (Int) -> Unit): File = withContext(Dispatchers.IO) {
++        val artifact = release.artifactFor(Build.SUPPORTED_ABIS.toList())
++        val final = file(context, release, artifact)
++        if (final.isFile) {
++            try {
++                verify(context, final, release)
++                return@withContext final
++            } catch (_: Exception) {
++                final.delete()
++            }
++        }
++        val partial = File(final.parentFile, final.name + ".part")
++        var offset = partial.length().takeIf { it in 1 until artifact.bytes } ?: 0L
++        val origin = prefs(context).getString("origin", UpdateRelease.BASE_URL).takeIf { it in UpdateRelease.TRUSTED_ORIGINS } ?: UpdateRelease.BASE_URL
++        val request = Request.Builder().url(origin + artifact.file)
++            .apply { if (offset > 0) header("Range", "bytes=$offset-") }.build()
++        client.newCall(request).execute().use { response ->
++            require(response.code == 200 || response.code == 206 && offset > 0) { "更新下载未成功" }
++            if (response.code == 206) require(response.header("Content-Range")?.startsWith("bytes $offset-") == true)
++            if (response.code == 200) offset = 0
++            response.body.byteStream().use { stream ->
++                FileOutputStream(partial, offset > 0).use { output ->
++                    val buffer = ByteArray(64 * 1024)
++                    var total = offset
++                    var shown = -1
++                    while (true) {
++                        coroutineContext.ensureActive()
++                        val count = stream.read(buffer)
++                        if (count < 0) break
++                        total += count
++                        require(total <= artifact.bytes) { "更新下载超出预期大小" }
++                        output.write(buffer, 0, count)
++                        val percent = (total * 100 / artifact.bytes).toInt()
++                        if (percent != shown) {
++                            progress(percent)
++                            shown = percent
++                        }
++                    }
++                    output.fd.sync()
++                    if (total != artifact.bytes) throw IOException("更新包尚未下载完整")
++                }
++            }
++        }
++        require(UpdateRelease.sha256(partial) == artifact.sha256) { "更新文件校验不一致" }
++        require(partial.renameTo(final)) { "无法保存更新文件" }
++        try {
++            verify(context, final, release)
++        } catch (error: Exception) {
++            final.delete()
++            throw error
++        }
++        final
++    }
++
++    @Suppress("DEPRECATION")
++    fun verify(context: Context, file: File, release: UpdateRelease) {
++        val artifact = release.artifactFor(Build.SUPPORTED_ABIS.toList())
++        require(file.length() == artifact.bytes && UpdateRelease.sha256(file) == artifact.sha256) { "更新包校验失败" }
++        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
++        val current = context.packageManager.getPackageInfo(context.packageName, flags)
++        val archive = requireNotNull(context.packageManager.getPackageArchiveInfo(file.absolutePath, flags)) { "无法读取安装包" }
++        fun version(info: PackageInfo): Long = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode else info.versionCode.toLong()
++        fun signers(info: PackageInfo): Set<String> {
++            val signatures = if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures
++            return signatures?.map { sig -> MessageDigest.getInstance("SHA-256").digest(sig.toByteArray()).joinToString("") { "%02x".format(it) } }?.toSet() ?: emptySet()
++        }
++        UpdateRelease.requireIdentity(archive.packageName, version(archive), release.versionCode, version(current), signers(current), signers(archive))
++    }
++
++    fun createChannel(context: Context) {
++        if (Build.VERSION.SDK_INT >= 26) context.getSystemService(NotificationManager::class.java)
++            .createNotificationChannel(NotificationChannel(CHANNEL, "应用更新", NotificationManager.IMPORTANCE_LOW))
++    }
++
++    fun notification(context: Context, title: String, text: String): NotificationCompat.Builder {
++        createChannel(context)
++        return NotificationCompat.Builder(context, CHANNEL).setSmallIcon(R.drawable.ic_star_notify)
++            .setContentTitle(title).setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text)).setOnlyAlertOnce(true)
++    }
++
++    @SuppressLint("MissingPermission")
++    fun notifyReady(context: Context, release: UpdateRelease) {
++        prefs(context).edit().putString("ready", release.toJson()).apply()
++        if (!Permissions.canPostNotifications(context)) return
++        val intent = Intent(context, UpdateInstallerActivity::class.java).putExtra("version", release.versionCode)
++        val pending = PendingIntent.getActivity(context, release.versionCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
++        val message = notification(context, "更新已下载：${release.versionName}", "点此确认安装，词库和学习记录会保留。")
++            .setContentIntent(pending).setAutoCancel(true).build()
++        NotificationManagerCompat.from(context).notify(READY_ID, message)
++    }
++}
+diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/updates/UpdateInstallerActivity.kt b/AnkiDroid/src/main/java/com/ichi2/anki/updates/UpdateInstallerActivity.kt
+new file mode 100644
+--- /dev/null
++++ b/AnkiDroid/src/main/java/com/ichi2/anki/updates/UpdateInstallerActivity.kt
+@@ -0,0 +1,80 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.updates
++
++import android.content.Intent
++import android.net.Uri
++import android.os.Build
++import android.os.Bundle
++import android.provider.Settings
++import android.widget.Toast
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.appcompat.app.AppCompatActivity
++import androidx.core.content.FileProvider
++import androidx.lifecycle.lifecycleScope
++import com.google.android.material.dialog.MaterialAlertDialogBuilder
++import com.ichi2.anki.BuildConfig
++import com.ichi2.anki.common.updates.UpdateRelease
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import java.io.File
++
++/** The system installer always makes the final decision; this activity never installs silently. */
++class UpdateInstallerActivity : AppCompatActivity() {
++    private lateinit var release: UpdateRelease
++    private lateinit var apk: File
++    private var externalFlow = false
++    private val permission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
++        if (Build.VERSION.SDK_INT < 26 || packageManager.canRequestPackageInstalls()) install()
++        else finish()
++    }
++    private val installer = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { finish() }
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        try {
++            release = UpdateRelease.parse(requireNotNull(AppUpdater.prefs(this).getString("ready", null)))
++            require(release.versionCode == intent.getIntExtra("version", 0) && release.versionCode > BuildConfig.VERSION_CODE)
++            apk = AppUpdater.file(this, release, release.artifactFor(Build.SUPPORTED_ABIS.toList()))
++        } catch (_: Exception) {
++            Toast.makeText(this, "请在“应用更新”中重新检查版本", Toast.LENGTH_LONG).show()
++            finish()
++            return
++        }
++        externalFlow = savedInstanceState?.getBoolean("external_flow", false) == true
++        if (externalFlow) return
++        if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
++            MaterialAlertDialogBuilder(this)
++                .setTitle("允许安装应用更新")
++                .setMessage("接下来在系统页面允许“AnkiDroid 分流测试”安装应用，再返回确认更新。词库和学习记录会保留。")
++                .setPositiveButton("前往允许") { _, _ ->
++                    externalFlow = true
++                    permission.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
++                }
++                .setNegativeButton("稍后") { _, _ -> finish() }
++                .setOnCancelListener { finish() }.show()
++        } else install()
++    }
++
++    override fun onSaveInstanceState(outState: Bundle) {
++        outState.putBoolean("external_flow", externalFlow)
++        super.onSaveInstanceState(outState)
++    }
++
++    private fun install() {
++        lifecycleScope.launch {
++            try {
++                withContext(Dispatchers.IO) { AppUpdater.verify(this@UpdateInstallerActivity, apk, release) }
++                com.ichi2.anki.analysis.AnalysisBackup.create(this@UpdateInstallerActivity)
++                val uri = FileProvider.getUriForFile(this@UpdateInstallerActivity, "$packageName.apkgfileprovider", apk)
++                externalFlow = true
++                installer.launch(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
++                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).putExtra(Intent.EXTRA_RETURN_RESULT, true))
++            } catch (_: Exception) {
++                MaterialAlertDialogBuilder(this@UpdateInstallerActivity).setTitle("无法安装此更新")
++                    .setMessage("更新校验、本地备份或系统安装准备未完成，本次安装已停止。请检查存储空间后重试。")
++                    .setPositiveButton("关闭") { _, _ -> finish() }.setOnCancelListener { finish() }.show()
++            }
++        }
++    }
++}
+diff --git a/README-分流测试.md b/README-分流测试.md
+new file mode 100644
+--- /dev/null
++++ b/README-分流测试.md
+@@ -0,0 +1,58 @@
++# AnkiDroid 单词分流测试版
++
++基于 AnkiDroid **v2.22.3 / Anki 25.07.5 / FSRS 6**。这是个人定制测试版，并非 AnkiDroid 官方发行版。
++
++应用名称：**AnkiDroid 分流测试**。应用标识：`com.ichi2.anki.diversion`。与官方应用分别安装、分别存储数据，不能覆盖官方 APK。
++
++默认强制使用本应用的独立目录，测试包移除了“所有文件访问”权限；不会自动采用公共 `AnkiDroid` 文件夹。请通过系统文件选择器导入副本，不要手动把存储路径改到官方版目录。
++
++## 使用规则
++
++1. 首次启用后，每张卡在指定原牌组（含其子牌组）累计 **10 次 Again**，移到独立的“单词修复”普通牌组。普通学习、重学和复习阶段都计算；以前的记录不追算。
++2. 修复组内连续 **5 次 Easy** 才回到进入前的具体原牌组。Hard、Good、Again 都清零连续次数。正常安排下同一天的多次真实作答可以累计；不会为凑五次额外展示卡片。
++3. 回原组后从零累计下一轮 Again。修复组的 Again 独立计数，不带回原组，也不创建第三个牌组。
++4. 复习历史、FSRS 记忆状态、原始评分保留。每张卡独立计数，不把同一笔记下不同方向的卡合并。
++5. 启用后的受管理卡片不因原有顽固卡阈值自动暂停，避免被旧阈值提前拦住；手动暂停不被此功能解除。
++
++## 第一次试用
++
++1. 在官方 AnkiDroid 导出包含学习进度的完整集合副本，保留备份，继续保留官方应用。
++2. 安装测试版，在测试版中导入该副本。第一轮验证先不登录 AnkiWeb、不与正式集合双向同步，避免把试验中的变化同步回日常使用的数据。
++3. 打开日常背词的普通牌组，进入学习概览页，右上角菜单选择 **单词分流规则**，核对原组名称后点 **启用规则**。启用前默认不计数、不迁移；不要在已有筛选牌组中启用。
++4. “单词修复”会作为独立的顶层普通牌组创建；若同名已存在，另建带编号的牌组。它有独立设置，复制原组的调度参数，不修改原预设，不添加新卡。
++5. 修复组不会混入所选原牌组的复习范围。需要修复时单独进入；建议每天 5–10 分钟后自行停止，本版本没有自动限时。
++
++规则设置属于集合，进度属于卡片自定义数据，均能保存在集合中。它们能随集合传输，但自动执行依赖这个定制版。官方客户端不执行该规则；以后若在其他客户端答题，那些作答不会被此版本追算为规则计数。
++
++## 查看与撤销
++
++- 迁入、修复进度和返回原组时，复习界面给出简短提示。
++- 学习概览菜单可查看规则作用范围、修复组及当前分流卡片数量。
++- 撤销上一题时，计数与该题触发的牌组迁移一并撤销；重新打开应用不清零进度。
++- 在规则菜单选择 **停用并归还全部**，确认后将本规则迁入的卡片返回各自原组，本轮计数归零；保留学习历史。该操作可以原生撤销。
++- 不要删除原牌组，或把修复组放进原组的子牌组中。若发生此类结构变化，程序会先提示修复，避免返回错误牌组。
++
++## 构建与代码
++
++需要 JDK 17/21/24、Android SDK 35。使用项目自带 Gradle Wrapper。
++
++```text
++gradlew.bat :libanki:testDebugUnitTest --tests "com.ichi2.anki.libanki.sched.StudyDiversionTest"
++gradlew.bat :AnkiDroid:assembleFullDebug
++```
++
++主要改动：
++
++- `libanki/.../sched/StudyDiversion.kt`：计数、校验、迁移和撤销合并。
++- `Scheduler.kt`：统一接入两套复习界面及官方评分入口。
++- `StudyOptionsFragment.kt`：启用、查看与停用归还入口。
++- `Reviewer.kt`、`ReviewerViewModel.kt`：作答后的进度提示。
++- `StudyDiversionTest.kt`：使用真实 Anki 后端验证计数、移动、历史和撤销。
++
++上游版本固定为 commit `4f2ec681da36b8307a865f05192498b8425adf0f`。
++
++## 许可与维护
++
++遵循仓库原有 GPL-3.0-or-later 及各第三方组件许可，保留原版权与许可文件；新增代码同样采用 GPL-3.0-or-later。安装包应和对应修改源码一并提供。
++
++此测试版使用调试签名，只用于安装验证。不要卸载正式版来覆盖安装，也不要将仓库内公开的上游备用签名当作生产私钥。后续长期使用前，需要单独安排升级签名、迁移验证和上游版本更新。
+diff --git a/common/src/main/java/com/ichi2/anki/common/updates/UpdateRelease.kt b/common/src/main/java/com/ichi2/anki/common/updates/UpdateRelease.kt
+new file mode 100644
+--- /dev/null
++++ b/common/src/main/java/com/ichi2/anki/common/updates/UpdateRelease.kt
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.common.updates
++
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++import kotlinx.serialization.json.putJsonObject
++import java.io.File
++import java.security.MessageDigest
++
++data class UpdateArtifact(val file: String, val sha256: String, val bytes: Long)
++
++data class UpdateRelease(
++    val versionCode: Int,
++    val versionName: String,
++    val notes: String,
++    val artifacts: Map<String, UpdateArtifact>,
++) {
++    fun artifactFor(supportedAbis: List<String>): UpdateArtifact =
++        supportedAbis.firstNotNullOfOrNull { artifacts[it] }
++            ?: throw IllegalArgumentException("本版本尚未提供适合此手机的安装包")
++
++    fun toJson(): String = buildJsonObject {
++        put("schema", 1)
++        put("packageName", PACKAGE_NAME)
++        put("versionCode", versionCode)
++        put("versionName", versionName)
++        put("notes", notes)
++        putJsonObject("artifacts") {
++            artifacts.forEach { (abi, item) ->
++                putJsonObject(abi) {
++                    put("file", item.file)
++                    put("sha256", item.sha256)
++                    put("bytes", item.bytes)
++                }
++            }
++        }
++    }.toString()
++
++    companion object {
++        const val PACKAGE_NAME = "com.ichi2.anki.diversion"
++        const val BASE_URL = "https://kailang.online/anki-updates/"
++        val TRUSTED_ORIGINS = listOf(BASE_URL, "https://47-109-157-25.sslip.io/anki-updates/")
++        const val MAX_APK_BYTES = 200L * 1024 * 1024
++        const val MAX_MANIFEST_BYTES = 32 * 1024
++
++        fun parse(text: String): UpdateRelease {
++            require(text.toByteArray().size <= MAX_MANIFEST_BYTES) { "更新说明过大" }
++            val root = Json.parseToJsonElement(text).jsonObject
++            fun JsonObject.string(key: String): String = getValue(key).jsonPrimitive.content
++            require(root.string("schema") == "1") { "不支持的更新格式" }
++            require(root.string("packageName") == PACKAGE_NAME) { "更新包不属于当前应用" }
++            val version = root.string("versionCode").toInt()
++            require(version > 0)
++            val name = root.string("versionName")
++            require(name.isNotBlank() && name.length <= 80)
++            val notes = root.string("notes")
++            require(notes.length <= 2000)
++            val items = root.getValue("artifacts").jsonObject.mapValues { (_, value) ->
++                val item = value.jsonObject
++                val file = item.string("file")
++                require(file.matches(Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,150}\\.apk")) && !file.contains("..")) { "更新文件路径无效" }
++                val hash = item.string("sha256").lowercase()
++                require(hash.matches(Regex("[a-f0-9]{64}"))) { "更新校验值无效" }
++                val size = item.string("bytes").toLong()
++                require(size in 1..MAX_APK_BYTES) { "更新包大小无效" }
++                UpdateArtifact(file, hash, size)
++            }
++            require(items.isNotEmpty() && items.size <= 4 && items.keys.all { it in listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") })
++            return UpdateRelease(version, name, notes, items)
++        }
++
++        fun sha256(file: File): String {
++            val digest = MessageDigest.getInstance("SHA-256")
++            file.inputStream().use { input ->
++                val buffer = ByteArray(64 * 1024)
++                while (true) {
++                    val count = input.read(buffer)
++                    if (count < 0) break
++                    digest.update(buffer, 0, count)
++                }
++            }
++            return digest.digest().joinToString("") { "%02x".format(it) }
++        }
++
++        fun requireIdentity(
++            packageName: String,
++            versionCode: Long,
++            expectedVersion: Int,
++            installedVersion: Long,
++            installedSigners: Set<String>,
++            archiveSigners: Set<String>,
++        ) {
++            require(packageName == PACKAGE_NAME) { "安装包的应用标识不一致" }
++            require(versionCode == expectedVersion.toLong() && versionCode > installedVersion) { "安装包版本不符合更新要求" }
++            require(installedSigners.isNotEmpty() && installedSigners == archiveSigners) { "安装包签名与当前应用不一致" }
++        }
++    }
++}
+diff --git a/common/src/test/java/com/ichi2/anki/common/updates/UpdateReleaseTest.kt b/common/src/test/java/com/ichi2/anki/common/updates/UpdateReleaseTest.kt
+new file mode 100644
+--- /dev/null
++++ b/common/src/test/java/com/ichi2/anki/common/updates/UpdateReleaseTest.kt
+@@ -0,0 +1,94 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.common.updates
++
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.io.File
++
++class UpdateReleaseTest {
++    private val artifact = UpdateArtifact("AnkiDroid-r3-arm64.apk", "a".repeat(64), 54387526)
++    private val release = UpdateRelease(22203302, "2.22.3-routing3-test", "更新测试\n含中文、\"引号\"与反斜杠\\", mapOf("arm64-v8a" to artifact))
++
++    @Test
++    fun roundTripPreservesReleaseAndNotes() {
++        assertEquals(release, UpdateRelease.parse(release.toJson()))
++    }
++
++    @Test
++    fun selectsFirstSupportedArchitecture() {
++        val arm32 = artifact.copy(file = "AnkiDroid-r3-arm32.apk")
++        val both = release.copy(artifacts = mapOf("arm64-v8a" to artifact, "armeabi-v7a" to arm32))
++        assertEquals(artifact, both.artifactFor(listOf("arm64-v8a", "armeabi-v7a")))
++        assertEquals(arm32, both.artifactFor(listOf("armeabi-v7a")))
++        assertThrows(IllegalArgumentException::class.java) { both.artifactFor(listOf("x86")) }
++    }
++
++    @Test
++    fun rejectsDifferentPackageAndSchema() {
++        assertThrows(IllegalArgumentException::class.java) { UpdateRelease.parse(release.toJson().replace(UpdateRelease.PACKAGE_NAME, "another.application")) }
++        assertThrows(IllegalArgumentException::class.java) { UpdateRelease.parse(release.toJson().replace("\"schema\":1", "\"schema\":2")) }
++    }
++
++    @Test
++    fun rejectsRemoteUrlsTraversalAndExtraQuery() {
++        listOf("../other.apk", "https://evil.example/other.apk", "/other.apk", "a..apk", "x.apk?download=true").forEach { bad ->
++            assertThrows(IllegalArgumentException::class.java) { UpdateRelease.parse(release.copy(artifacts = mapOf("arm64-v8a" to artifact.copy(file = bad))).toJson()) }
++        }
++    }
++
++    @Test
++    fun rejectsInvalidHashAndSize() {
++        listOf(artifact.copy(sha256 = "not-a-hash"), artifact.copy(bytes = 0), artifact.copy(bytes = UpdateRelease.MAX_APK_BYTES + 1)).forEach { bad ->
++            assertThrows(IllegalArgumentException::class.java) { UpdateRelease.parse(release.copy(artifacts = mapOf("arm64-v8a" to bad)).toJson()) }
++        }
++    }
++
++    @Test
++    fun rejectsLargeResponseBeforeParsing() {
++        assertThrows(IllegalArgumentException::class.java) { UpdateRelease.parse(" ".repeat(UpdateRelease.MAX_MANIFEST_BYTES + 1)) }
++    }
++
++    @Test
++    fun verifiesFileBytesWithSha256() {
++        val file = File.createTempFile("update-integrity", ".apk")
++        try {
++            file.writeText("abc")
++            assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", UpdateRelease.sha256(file))
++        } finally { file.delete() }
++    }
++
++    private fun identity(pkg: String = UpdateRelease.PACKAGE_NAME, version: Long = 3, installed: Long = 2, actual: Set<String> = setOf("same")) =
++        UpdateRelease.requireIdentity(pkg, version, 3, installed, setOf("same"), actual)
++
++    @Test
++    fun matchingUpgradeIsAccepted() { identity() }
++
++    @Test
++    fun wrongPackageOrVersionIsRejected() {
++        assertThrows(IllegalArgumentException::class.java) { identity(pkg = "another.application") }
++        assertThrows(IllegalArgumentException::class.java) { identity(version = 4) }
++    }
++
++    @Test
++    fun downgradeAndSameVersionAreRejected() {
++        assertThrows(IllegalArgumentException::class.java) { identity(installed = 3) }
++        assertThrows(IllegalArgumentException::class.java) { identity(installed = 4) }
++    }
++
++    @Test
++    fun differentOrMissingSignerIsRejected() {
++        assertThrows(IllegalArgumentException::class.java) { identity(actual = setOf("different")) }
++        assertThrows(IllegalArgumentException::class.java) { identity(actual = emptySet()) }
++    }
++
++    @Test
++    fun allConfiguredOriginsUseHttps() {
++        UpdateRelease.TRUSTED_ORIGINS.forEach {
++            val uri = java.net.URI(it)
++            assertEquals("https", uri.scheme)
++            assertEquals("/anki-updates/", uri.path)
++            assertEquals(null, uri.userInfo)
++        }
++    }
++}
+diff --git a/deploy/updates/README.md b/deploy/updates/README.md
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/README.md
+@@ -0,0 +1,40 @@
++# ECS 应用更新通道
++
++公开入口：`https://kailang.online/anki-updates/`。版本文件为 `latest.json`，仅包含应用版本、说明、安装包校验值与对应 GPL 源码下载链接。
++
++备用 HTTPS 入口：`https://47-109-157-25.sslip.io/anki-updates/`，指向同一 ECS 和同一发布目录。若一个域名的连接失败，应用会尝试另一个预置入口；不会跟随服务器提供的任意下载地址或跳转。
++
++手机不需要也不包含 ECS root 密钥。SSH 密钥只由本机发布流程使用；应用通过 HTTPS 匿名下载公开安装包，不上传牌组、学习记录或 AnkiWeb 凭据。
++
++## 手机行为
++
++- 首次需要覆盖安装一次带此功能的新版；保留相同应用标识和原签名。
++- 默认开启自动更新。应用回首页时最多每 6 小时检查一次；后台约每天检查一次，Wi-Fi 下下载。安卓后台限制可能推迟执行，并非精确闹钟。
++- 下载支持中断续传。文件下载完成后校验 SHA-256、应用标识、版本号与当前已安装应用的签名，任何一项不一致都不会进入安装。
++- 下载完成后发出通知，点击后由系统确认安装。首次可能需要允许“AnkiDroid 分流测试”安装未知应用。没有 Root，也不会静默安装。
++- 首页菜单“应用更新”可手动检查、关闭自动下载；主动点“下载更新”允许使用当前网络，包括手机流量。
++- 如果关闭了通知权限，可在“应用更新”中检查并安装已下载的更新。
++
++## 发布
++
++使用本目录的 `publish.ps1`，指定递增的 BuildNumber 和简短更新说明。脚本会先运行更新安全测试和分流专项测试、构建 APK，再验证签名与包名，最后上传并原子切换版本文件。新版本必须使用原签名文件；丢失后应先恢复备份，不能生成另一把密钥代替。
++
++原签名文件位于工作区的 `.android/debug.keystore`，不进入源码 ZIP，不上传到 ECS。这沿用第一次测试版的调试签名，用于保证现有测试版能覆盖升级。若今后要改为正式发布签名，需另行安排签名迁移；不能直接更换。
++
++服务器仅添加独立静态路径 `/anki-updates/`，发布脚本放在 `/opt/anki-updates/`，配置备份在 `/var/backups/anki-updates/`。现有考试系统和其他服务仍按原路由运行。没有额外的常驻更新后端进程。
++
++## 维护
++
++- HTTPS 复用 `kailang.online` 证书；本次核查有效期至 2027-01-18。需随原站点正常续期。
++- 备用入口证书本次核查有效期至 2027-01-07。两个域名的续期任务尚未核实，应随站点维护检查；证书失效时客户端会停止该入口的更新连接。
++- 每版安装包和对应完整修改源码均保留在静态目录；版本较多后可按需归档旧文件。
++- 客户端会拒绝低于或等于已安装版本的更新。需要回退功能时应以更高版本号发布修复包，避免卸载应用丢失独立目录中的数据。
++- 此通道提供应用更新，不等于已部署学习记录上传或 AI 查询服务。
++
++## 2026-10-26 发布验证
++
++已发布 `2.22.3-routing5-test`（versionCode `22203304`）。12 项更新安全测试和 17 项真实 Anki 后端分流测试全部通过，四种架构均核对了原应用签名。备用 HTTPS 入口的版本清单和 ARM64 安装包返回 200。
++
++隔离模拟器从 routing4 自动发现并下载 routing5，显示“更新已下载”通知；点击后正确引导系统安装来源授权，再由 Android 原生安装器确认覆盖升级。安装后系统报告 routing5，没有清除应用数据。原有考试站点在发布后仍返回 200。
++
++复现发布时使用 `publish.ps1 -BuildNumber 5 -Notes '更新说明'`；今后发布必须使用大于 5 的 BuildNumber。构建采用单工作线程，避免本机多架构并发打包的偶发失败。完整验证记录位于工作区 `outputs/自动更新验证/`。
+diff --git a/deploy/updates/index.html b/deploy/updates/index.html
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/index.html
+@@ -0,0 +1,14 @@
++<!doctype html>
++<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
++<title>AnkiDroid 分流版更新</title>
++<style>
++:root{font-family:system-ui,sans-serif;color:#17202b;background:#f5f8fc}body{max-width:680px;margin:8vh auto;padding:24px}main{background:white;border:1px solid #e4eaf2;border-radius:24px;padding:32px;box-shadow:0 20px 60px #1838580a;animation:appear .4s ease-out}h1{font-size:30px;margin:0 0 16px}p{line-height:1.8;color:#526071}.button{display:inline-block;background:#1262de;color:white;text-decoration:none;padding:14px 22px;border-radius:12px;margin:8px 12px 8px 0;transition:transform .15s,background .15s}.button:hover{background:#094daF;transform:translateY(-2px)}.button:active{transform:scale(.98)}.secondary{background:#eaf1fd;color:#1758b2}small{display:block;line-height:1.8;color:#657186}pre{font:inherit;white-space:pre-wrap;line-height:1.8}a{color:#1262de}@keyframes appear{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
++</style><main><h1>AnkiDroid 分流版更新</h1><p id="version">正在获取最新版本…</p><div id="downloads"></div><pre id="notes"></pre><small>首次安装这个带更新功能的版本后，应用可自动检查并在 Wi-Fi 下下载新版。安装仍需你在系统页面确认。<br>覆盖安装时保留原应用，不要先卸载；保留词库、学习记录和分流计数。</small><p id="source"></p></main>
++<script>
++fetch('latest.json',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{
++document.querySelector('#version').textContent='最新版本 '+v.versionName;
++document.querySelector('#notes').textContent=v.notes;
++for(const [abi,label] of [['arm64-v8a','下载安卓安装包'],['armeabi-v7a','32 位兼容安装包']]){const f=v.artifacts[abi];if(!f)continue;const a=document.createElement('a');a.href=f.file;a.className='button'+(abi==='arm64-v8a'?'':' secondary');a.textContent=label+' · '+Math.round(f.bytes/1e6)+' MB';document.querySelector('#downloads').append(a)}
++const a=document.createElement('a');a.href=v.source.file;a.textContent='下载对应完整源码（GPL）';document.querySelector('#source').append(a);
++}).catch(()=>{document.querySelector('#version').textContent='暂时无法获取版本，请稍后刷新。'});
++</script></html>
+diff --git a/deploy/updates/nginx-updates.inc b/deploy/updates/nginx-updates.inc
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/nginx-updates.inc
+@@ -0,0 +1,22 @@
++# Static application releases; no study database or credentials are stored here.
++location = /anki-updates/latest.json {
++    alias /var/www/anki-updates/latest.json;
++    default_type application/json;
++    add_header Cache-Control "no-store" always;
++    add_header Strict-Transport-Security "max-age=31536000" always;
++}
++location ^~ /anki-updates/staging/ { deny all; }
++location ^~ /anki-updates/ {
++    alias /var/www/anki-updates/;
++    index index.html;
++    autoindex off;
++    limit_except GET HEAD { deny all; }
++    types {
++        application/json json;
++        application/vnd.android.package-archive apk;
++        application/zip zip;
++        text/html html;
++    }
++    add_header X-Content-Type-Options nosniff always;
++    add_header Strict-Transport-Security "max-age=31536000" always;
++}
+diff --git a/deploy/updates/publish.ps1 b/deploy/updates/publish.ps1
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/publish.ps1
+@@ -0,0 +1,86 @@
++param(
++    [Parameter(Mandatory)][ValidateRange(2, 9999)][int]$BuildNumber,
++    [Parameter(Mandatory)][ValidateLength(1, 2000)][string]$Notes,
++    [string]$Server = '47.109.157.25',
++    [int]$Port = 2222,
++    [string]$SshKey = (Join-Path $env:USERPROFILE '.ssh\kailang_agent'),
++    [string]$SdkRoot = 'D:\android-sdk',
++    [string]$JavaRoot = 'D:\jdk17',
++    [switch]$AllowDependencyDownload
++)
++$ErrorActionPreference = 'Stop'
++$repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
++$workspaceRoot = Split-Path $repoRoot -Parent
++$releaseDirectory = Join-Path $workspaceRoot "outputs\AnkiDroid自动更新\routing$BuildNumber"
++$signingKey = Join-Path $workspaceRoot '.android\debug.keystore'
++if (!(Test-Path -LiteralPath $signingKey)) { throw '原签名文件缺失；不可生成新密钥替代，请先恢复原文件。' }
++if (!(Test-Path -LiteralPath $SshKey)) { throw 'ECS SSH 密钥不存在。' }
++$env:JAVA_HOME = $JavaRoot
++$env:ANDROID_HOME = $SdkRoot
++$env:ANDROID_USER_HOME = Join-Path $workspaceRoot '.android'
++$env:GRADLE_USER_HOME = Join-Path $workspaceRoot '.gradle-cache'
++$env:ANKI_UPDATE_KEYSTORE = $signingKey
++$env:Path = "$JavaRoot\bin;$env:Path"
++$expectedSigner = '7b4f72e72c4e4017341abe6760f8d94f12cca7a9c5805ebabd5fd5dd68088d33'
++$versionCode = 22203299 + $BuildNumber
++$versionName = "2.22.3-routing$BuildNumber-test"
++$sshArgs = @('-i', $SshKey, '-p', "$Port", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', "root@$Server")
++$scpArgs = @('-i', $SshKey, '-P', "$Port", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes')
++New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
++Push-Location $repoRoot
++try {
++    $gradleArgs = @(':common:testDebugUnitTest', '--tests', 'com.ichi2.anki.common.updates.UpdateReleaseTest',
++        ':libanki:testDebugUnitTest', '--tests', 'com.ichi2.anki.libanki.sched.StudyDiversionTest',
++        '--tests', 'com.ichi2.anki.libanki.sched.StudyAnalysisTest',
++        ':AnkiDroid:assembleFullDebug', "-PdiversionBuild=$BuildNumber", '-Pkotlin.compiler.execution.strategy=in-process', '--no-daemon', '--max-workers=1', '--console=plain')
++    if (!$AllowDependencyDownload) { $gradleArgs += '--offline' }
++    & .\gradlew.bat @gradleArgs
++    if ($LASTEXITCODE -ne 0) { throw '构建或测试未通过，停止发布。' }
++    $artifacts = [ordered]@{}
++    foreach ($abi in @('arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86')) {
++        $apk = Join-Path $repoRoot "AnkiDroid\build\outputs\apk\full\debug\AnkiDroid-full-$abi-debug.apk"
++        $signature = (& "$SdkRoot\build-tools\35.0.0\apksigner.bat" verify --print-certs $apk) -join "`n"
++        if ($LASTEXITCODE -ne 0 -or $signature -notmatch "certificate SHA-256 digest: $expectedSigner") { throw "签名不匹配：$abi；停止发布。" }
++        $badging = (& "$SdkRoot\build-tools\35.0.0\aapt.exe" dump badging $apk) -join "`n"
++        if ($badging -notmatch "package: name='com.ichi2.anki.diversion' versionCode='$versionCode' versionName='$versionName'") { throw "应用标识或版本不一致：$abi" }
++        $filename = "AnkiDroid-routing$BuildNumber-$abi.apk"
++        $target = Join-Path $releaseDirectory $filename
++        Copy-Item -LiteralPath $apk -Destination $target
++        $artifacts[$abi] = @{file=$filename;sha256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant();bytes=(Get-Item -LiteralPath $target).Length}
++    }
++    $sourceName = "AnkiDroid-routing$BuildNumber-source.zip"
++    $sourcePath = Join-Path $releaseDirectory $sourceName
++    & git archive --format=zip "--output=$sourcePath" HEAD
++    if ($LASTEXITCODE -ne 0) { throw '无法打包上游源码。' }
++    $changed = @(& git -c core.quotepath=false diff --name-only HEAD) + @(& git -c core.quotepath=false ls-files --others --exclude-standard)
++    Add-Type -AssemblyName System.IO.Compression.FileSystem
++    $archive = [IO.Compression.ZipFile]::Open($sourcePath, [IO.Compression.ZipArchiveMode]::Update)
++    try {
++        foreach ($relative in ($changed | Select-Object -Unique)) {
++            if ([string]::IsNullOrWhiteSpace($relative)) { continue }
++            $path = Join-Path $repoRoot $relative
++            $entry = $archive.GetEntry($relative)
++            if ($entry) { $entry.Delete() }
++            if (Test-Path -LiteralPath $path -PathType Leaf) { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $path, $relative) | Out-Null }
++        }
++    } finally { $archive.Dispose() }
++    $release = [ordered]@{
++        schema=1;packageName='com.ichi2.anki.diversion';versionCode=$versionCode;versionName=$versionName;notes=$Notes;
++        artifacts=$artifacts;
++        source=@{file=$sourceName;sha256=(Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant();bytes=(Get-Item -LiteralPath $sourcePath).Length}
++    }
++    $release | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $releaseDirectory 'latest.json') -Encoding utf8NoBOM
++    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'index.html') -Destination $releaseDirectory
++    $stage = "/var/www/anki-updates/staging/routing$BuildNumber-$([guid]::NewGuid().ToString('N'))"
++    & ssh.exe @sshArgs "install -d -m 700 '$stage'"
++    if ($LASTEXITCODE -ne 0) { throw '无法创建服务器发布暂存目录。' }
++    Push-Location $releaseDirectory
++    try {
++        $upload = @($artifacts.Values | ForEach-Object { './' + $_.file }) + @("./$sourceName", './latest.json', './index.html')
++        & scp.exe @scpArgs @upload "root@${Server}:$stage/"
++        if ($LASTEXITCODE -ne 0) { throw '文件上传未完成；线上版本未切换。' }
++    } finally { Pop-Location }
++    & ssh.exe @sshArgs "python3 /opt/anki-updates/publish_release.py '$stage'"
++    if ($LASTEXITCODE -ne 0) { throw '服务端验证未通过，停止发布。' }
++    Write-Output "已发布 ${versionName}：https://kailang.online/anki-updates/"
++} finally { Pop-Location }
+diff --git a/deploy/updates/publish_release.py b/deploy/updates/publish_release.py
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/publish_release.py
+@@ -0,0 +1,61 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Validate staged public release files and publish latest.json last, under a lock."""
++import datetime
++import fcntl
++import hashlib
++import json
++import os
++import pathlib
++import re
++import sys
++
++root = pathlib.Path("/var/www/anki-updates").resolve()
++staging = pathlib.Path(sys.argv[1]).resolve()
++if staging.parent != root / "staging" or not staging.is_dir():
++    raise SystemExit("Invalid release staging directory")
++lock_path = pathlib.Path("/opt/anki-updates/publish.lock")
++with lock_path.open("w") as lock:
++    fcntl.flock(lock, fcntl.LOCK_EX)
++    release = json.loads((staging / "latest.json").read_text("utf-8"))
++    if release["schema"] != 1 or release["packageName"] != "com.ichi2.anki.diversion":
++        raise SystemExit("Invalid application release")
++    latest = root / "latest.json"
++    previous = json.loads(latest.read_text("utf-8")) if latest.exists() else None
++    if previous and int(release["versionCode"]) <= int(previous["versionCode"]):
++        raise SystemExit("Version must increase; live feed was not changed")
++    files = list(release["artifacts"].values()) + [release["source"]]
++    for item in files:
++        name = item["file"]
++        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,150}\.(apk|zip)", name) or ".." in name:
++            raise SystemExit("Invalid artifact filename")
++        file = staging / name
++        if not file.is_file() or file.stat().st_size != item["bytes"]:
++            raise SystemExit("Release artifact size mismatch")
++        digest = hashlib.sha256()
++        with file.open("rb") as stream:
++            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++                digest.update(chunk)
++        if digest.hexdigest() != item["sha256"]:
++            raise SystemExit("Release artifact checksum mismatch")
++        if (root / name).exists():
++            raise SystemExit("An immutable release filename is already published")
++    for item in files:
++        destination = root / item["file"]
++        os.replace(staging / item["file"], destination)
++        destination.chmod(0o644)
++    if (staging / "index.html").is_file():
++        os.replace(staging / "index.html", root / "index.html")
++        (root / "index.html").chmod(0o644)
++    if previous:
++        history = pathlib.Path("/var/backups/anki-updates")
++        history.mkdir(parents=True, exist_ok=True)
++        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
++        (history / ("latest-" + stamp + ".json")).write_text(json.dumps(previous, ensure_ascii=False), "utf-8")
++    candidate = root / "latest.next"
++    candidate.write_text(json.dumps(release, ensure_ascii=False, indent=2) + "\n", "utf-8")
++    candidate.chmod(0o644)
++    with candidate.open("rb") as stream:
++        os.fsync(stream.fileno())
++    os.replace(candidate, latest)
++print(json.dumps({"published": release["versionName"], "versionCode": release["versionCode"]}))
+diff --git a/deploy/updates/setup_server.py b/deploy/updates/setup_server.py
+new file mode 100644
+--- /dev/null
++++ b/deploy/updates/setup_server.py
+@@ -0,0 +1,63 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: GPL-3.0-or-later
++"""Install the isolated static update location after checking the audited Nginx file."""
++import argparse
++import hashlib
++import pathlib
++import shutil
++import subprocess
++import datetime
++import re
++
++parser = argparse.ArgumentParser()
++parser.add_argument("--expected-nginx-sha256", required=True)
++parser.add_argument("--snippet", required=True)
++parser.add_argument("--publisher", required=True)
++parser.add_argument("--nginx-config", choices=["/etc/nginx/conf.d/exam-kailang.conf", "/etc/nginx/conf.d/aa-47-109-157-25.sslip.io.conf"], default="/etc/nginx/conf.d/exam-kailang.conf")
++args = parser.parse_args()
++config = pathlib.Path(args.nginx_config)
++original = config.read_bytes()
++if hashlib.sha256(original).hexdigest() != args.expected_nginx_sha256:
++    raise SystemExit("Nginx configuration changed since audit; inspect again before deploying")
++snippet = pathlib.Path("/etc/nginx/snippets/anki-updates.inc")
++old_snippet = snippet.read_bytes() if snippet.exists() else None
++backup = pathlib.Path("/var/backups/anki-updates")
++backup.mkdir(parents=True, exist_ok=True)
++stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
++shutil.copy2(config, backup / (config.name + "." + stamp))
++root = pathlib.Path("/var/www/anki-updates")
++root.mkdir(mode=0o755, parents=True, exist_ok=True)
++(root / "staging").mkdir(mode=0o700, exist_ok=True)
++private = pathlib.Path("/opt/anki-updates")
++private.mkdir(mode=0o755, exist_ok=True)
++shutil.copyfile(args.publisher, private / "publish_release.py")
++(private / "publish_release.py").chmod(0o700)
++addition = b"    include /etc/nginx/snippets/anki-updates.inc;\n"
++try:
++    shutil.copyfile(args.snippet, snippet)
++    snippet.chmod(0o644)
++    if addition.strip() not in original:
++        if config.name == "exam-kailang.conf":
++            anchor = b"    include /etc/nginx/snippets/exam-locations.inc;"
++            if original.count(anchor) != 2:
++                raise RuntimeError("Unexpected HTTPS server structure")
++            new = original.replace(anchor, addition + anchor)
++        else:
++            pattern = rb"(?m)^([ \t]*listen[ \t]+443[ \t]+ssl[^;]*;)"
++            if len(re.findall(pattern, original)) != 1:
++                raise RuntimeError("Unexpected backup HTTPS server structure")
++            new = re.sub(pattern, lambda match: addition + match.group(1), original, count=1)
++        temporary = config.with_suffix(".anki-update.tmp")
++        temporary.write_bytes(new)
++        temporary.chmod(config.stat().st_mode & 0o777)
++        temporary.replace(config)
++    subprocess.run(["nginx", "-t"], check=True)
++    subprocess.run(["nginx", "-s", "reload"], check=True)
++except Exception:
++    config.write_bytes(original)
++    if old_snippet is None:
++        snippet.unlink(missing_ok=True)
++    else:
++        snippet.write_bytes(old_snippet)
++    raise
++print("HTTPS update path installed; existing website routes preserved")
+diff --git a/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyAnalysis.kt b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyAnalysis.kt
+new file mode 100644
+--- /dev/null
++++ b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyAnalysis.kt
+@@ -0,0 +1,180 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.libanki.sched
++
++import anki.collection.OpChanges
++import anki.scheduler.CardAnswer
++import com.ichi2.anki.libanki.Collection
++import java.io.File
++import java.io.FileOutputStream
++import java.util.TimeZone
++import org.json.JSONArray
++import org.json.JSONObject
++import timber.log.Timber
++
++/** Optional analysis sidecar. Official answers/undo remain authoritative. */
++object StudyAnalysis {
++    const val ENABLED = "privateAnalysisEnabledAt"
++    const val JOURNAL = "study-analysis-events.jsonl"
++    const val SETTINGS = "study-analysis-settings.json"
++    @Volatile var interruptedCard: Long = 0
++    @Volatile var recordingError = false
++
++    fun wordText(value: String): String {
++        val plain = value.replace(Regex("(?is)<(script|style)\\b[^>]*>.*?</\\1>"), "")
++            .replace(Regex("(?s)<!--.*?-->|<[^>]*>|\\[sound:[^]]*]"), "")
++        val names = mapOf("amp" to "&", "lt" to "<", "gt" to ">", "quot" to "\"", "apos" to "'", "nbsp" to " ",
++            "rsquo" to "’", "lsquo" to "‘", "ndash" to "–", "mdash" to "—")
++        return Regex("&(#x[0-9a-fA-F]+|#[0-9]+|[a-zA-Z]+);").replace(plain) { match ->
++            val key = match.groupValues[1]
++            names[key] ?: runCatching {
++                val number = if (key.startsWith("#x")) key.drop(2).toInt(16) else key.drop(1).toInt()
++                String(Character.toChars(number))
++            }.getOrElse { match.value }
++        }.trim().take(512)
++    }
++
++    fun journal(col: Collection) = File(col.colDb.parentFile, JOURNAL)
++
++    fun enabledAt(col: Collection): Long = runCatching {
++        val file = File(col.colDb.parentFile, SETTINGS)
++        if (file.isFile) JSONObject(file.readText()).getLong("enabledAt") else 0L
++    }.getOrDefault(0L).takeIf { it > 0 } ?: (col.config.get<Long>(ENABLED) ?: 0L)
++
++    fun enable(col: Collection) {
++        if (enabledAt(col) > 0L) return
++        val file = File(col.colDb.parentFile, SETTINGS)
++        val temporary = File(file.path + ".tmp")
++        FileOutputStream(temporary).use { out ->
++            out.write(JSONObject().put("enabledAt", System.currentTimeMillis()).toString().toByteArray(Charsets.UTF_8))
++            out.fd.sync()
++        }
++        require(temporary.renameTo(file)) { "无法保存分析设置" }
++    }
++
++    fun answer(col: Collection, input: CardAnswer, eventsFile: File? = null): OpChanges {
++        val enabledAt = enabledAt(col)
++        if (enabledAt == 0L) return StudyDiversion.answer(col, input)
++        val before = col.backend.getCard(input.cardId)
++        val previous = StudyDiversion.progress(before.customData)
++        val oldReview = col.db.queryLongScalar("select max(id) from revlog where cid=?", input.cardId)
++        val changes = StudyDiversion.answer(col, input)
++        // Sidecar failure must never make a successfully saved answer appear to fail.
++        try {
++            val after = col.backend.getCard(input.cardId)
++            val next = StudyDiversion.progress(after.customData)
++            col.db.query("select id,ease,time,ivl,lastIvl,type from revlog where cid=? order by id desc limit 1", input.cardId).use { row ->
++                if (row.moveToNext() && row.getLong(0) != oldReview) {
++                    val event = JSONObject()
++                        .put("reviewId", row.getLong(0)).put("cardId", input.cardId)
++                        .put("rating", row.getInt(1)).put("timeMs", row.getLong(2))
++                        .put("interval", row.getLong(3)).put("lastInterval", row.getLong(4)).put("reviewType", row.getInt(5))
++                        .put("deckId", before.originalDeckId.takeIf { it != 0L } ?: before.deckId)
++                        .put("before", if (previous?.inRepair == true) "repair" else "main")
++                        .put("after", if (next?.inRepair == true) "repair" else "main")
++                        .put("interrupted", interruptedCard == input.cardId)
++                        .put("roundAgain", when {
++                            previous?.inRepair == true -> (previous.repairAgain + if (input.rating == CardAnswer.Rating.AGAIN) 1 else 0)
++                            next?.inRepair == true -> 10
++                            else -> next?.again ?: 0
++                        })
++                    FileOutputStream(eventsFile ?: journal(col), true).use { output ->
++                        output.write((event.toString() + "\n").toByteArray(Charsets.UTF_8))
++                        output.fd.sync()
++                    }
++                }
++            }
++        } catch (error: Exception) {
++            recordingError = true
++            Timber.w(error, "Optional study analysis event could not be recorded")
++        } finally {
++            if (interruptedCard == input.cardId) interruptedCard = 0
++        }
++        return changes
++    }
++
++    /** Called only while holding CollectionManager's queue; release it before network I/O. */
++    fun snapshot(col: Collection, collectionId: String, wordFields: Map<Long, String> = emptyMap(), eventsFile: File? = null, authorizedDeckIds: Set<Long>? = null): JSONObject {
++        val settings = requireNotNull(StudyDiversion.settings(col)) { "请先启用单词分流规则" }
++        val mainName = col.decks.name(settings.source)
++        val scope = col.decks.allNamesAndIds(false).filter {
++            it.id == settings.source || it.id == settings.repair || it.name.startsWith("$mainName::")
++        }.filter { authorizedDeckIds == null || it.id in authorizedDeckIds }.toList()
++        val scopeIds = scope.map { it.id }.toSet()
++        require(settings.source in scopeIds && settings.repair in scopeIds) { "背词牌组已改变，请检查分流规则" }
++        val cards = JSONArray()
++        val notes = linkedMapOf<Long, JSONObject>()
++        val cardIds = hashSetOf<Long>()
++        var unmapped = 0
++        val fieldIndexes = mutableMapOf<Long, Int>()
++        col.db.query("""select c.id,c.nid,c.did,c.odid,c.queue,c.type,c.due,c.ivl,c.reps,c.lapses,c.factor,c.data,n.mid,n.flds
++            from cards c join notes n on n.id=c.nid order by c.id""").use { row ->
++            while (row.moveToNext()) {
++                val cid = row.getLong(0)
++                val nid = row.getLong(1)
++                val did = row.getLong(2)
++                val odid = row.getLong(3)
++                if ((odid.takeIf { it != 0L } ?: did) !in scopeIds) continue
++                val data = JSONObject(row.getString(11).ifBlank { "{}" })
++                val progress = StudyDiversion.progress(data.optString("cd", ""))
++                if ((odid.takeIf { it != 0L } ?: did) == settings.repair &&
++                    (progress == null || progress.epoch != settings.epoch || progress.home !in scopeIds)) continue
++                val mid = row.getLong(12)
++                val index = fieldIndexes.getOrPut(mid) {
++                    val names = col.notetypes.get(mid)?.fieldsNames ?: emptyList()
++                    // Unknown templates stay blank until the user previews and chooses a field.
++                    names.indexOf(wordFields[mid] ?: "Word")
++                }
++                val fields = row.getString(13).split('\u001f')
++                val word = if (index in fields.indices) wordText(fields[index]) else ""
++                if (index < 0) unmapped++
++                notes[nid] = JSONObject().put("id", nid).put("word", word)
++                val card = JSONObject().put("id", cid).put("noteId", nid).put("deckId", did).put("originalDeckId", odid)
++                    .put("queue", row.getInt(4)).put("type", row.getInt(5)).put("due", row.getLong(6))
++                    .put("interval", row.getLong(7)).put("reps", row.getInt(8)).put("lapses", row.getInt(9)).put("factor", row.getInt(10))
++                if (progress != null && progress.epoch == settings.epoch) card.put("diversion", JSONObject()
++                    .put("epoch", progress.epoch).put("again", progress.again).put("easy", progress.easy)
++                    .put("home", progress.home).put("repairAgain", progress.repairAgain))
++                cards.put(card)
++                cardIds.add(cid)
++            }
++        }
++        val events = linkedMapOf<Long, JSONObject>()
++        val journalFile = eventsFile ?: runCatching { journal(col) }.getOrNull()
++        var corruptLines = 0
++        journalFile?.takeIf { it.isFile }?.forEachLine { line ->
++            try {
++                val event = JSONObject(line)
++                events[event.getLong("reviewId")] = event
++            } catch (_: Exception) { corruptLines++ }
++        }
++        val reviews = JSONArray()
++        val liveEvents = JSONArray()
++        col.db.query("select id,cid,ease,ivl,lastIvl,time,type from revlog order by id").use { row ->
++            while (row.moveToNext()) {
++                if (row.getLong(1) !in cardIds) continue
++                val review = JSONObject().put("id", row.getLong(0)).put("cardId", row.getLong(1)).put("ease", row.getInt(2))
++                    .put("interval", row.getLong(3)).put("lastInterval", row.getLong(4)).put("timeMs", row.getLong(5)).put("type", row.getInt(6))
++                reviews.put(review)
++                events[row.getLong(0)]?.takeIf { event ->
++                    event.optLong("cardId") == row.getLong(1) && event.optInt("rating") == row.getInt(2) &&
++                        event.optLong("interval") == row.getLong(3) && event.optLong("lastInterval") == row.getLong(4) &&
++                        event.optLong("timeMs") == row.getLong(5) && event.optInt("reviewType") == row.getInt(6) &&
++                        event.optLong("deckId") in scopeIds
++                }?.let { liveEvents.put(it) }
++            }
++        }
++        val warnings = JSONArray().put("历史牌组归属按当前卡片推定；新增阶段记录从启用后开始。")
++        if (unmapped > 0) warnings.put("$unmapped 张卡片尚未选择单词字段，文字留空，作答仍参与统计。")
++        if (recordingError || corruptLines > 0) warnings.put("部分新增分析记录未能保存或读取，修复轮次和中断统计可能不完整。")
++        return JSONObject().put("schemaVersion", 2).put("collectionId", collectionId).put("source", "ankidroid-diversion")
++            .put("capturedAt", System.currentTimeMillis()).put("zoneId", TimeZone.getDefault().id)
++            .put("rolloverHour", col.getPreferences().scheduling.rollover)
++            .put("dayIndex", col.sched.today).put("nextDayAt", col.sched.dayCutoff)
++            .put("analysisEnabledAt", enabledAt(col))
++            .put("historyAvailable", true).put("historyComplete", true)
++            .put("mainDeckId", settings.source).put("repairDeckId", settings.repair)
++            .put("scopeDeckIds", JSONArray(scope.map { it.id }))
++            .put("decks", JSONArray(scope.map { JSONObject().put("id", it.id).put("name", it.name) }))
++            .put("notes", JSONArray(notes.values.toList())).put("cards", cards).put("reviews", reviews).put("events", liveEvents).put("warnings", warnings)
++    }
++}
+diff --git a/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.kt b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.kt
+new file mode 100644
+--- /dev/null
++++ b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.kt
+@@ -0,0 +1,252 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.libanki.sched
++
++import anki.collection.OpChanges
++import anki.scheduler.CardAnswer
++import com.google.protobuf.kotlin.toByteStringUtf8
++import com.ichi2.anki.libanki.Collection
++import com.ichi2.anki.libanki.DeckConfig
++import com.ichi2.anki.libanki.DeckId
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++import org.json.JSONArray
++import org.json.JSONObject
++
++/** Opt-in, per-card routing. Native scheduling, review history and sibling cards are preserved. */
++object StudyDiversion {
++    const val CONFIG_KEY = "studyDiversionV1"
++    const val DATA_KEY = "sdr"
++    const val AGAIN_LIMIT = 10
++    const val EASY_LIMIT = 5
++
++    @Serializable
++    data class Settings(
++        val source: Long,
++        val repair: Long,
++        val epoch: Long,
++        val enabled: Boolean = true,
++    )
++
++    data class Progress(
++        val epoch: Long,
++        val again: Int = 0,
++        val easy: Int = 0,
++        val home: Long = 0,
++        val repairAgain: Int = 0,
++        val lastAnswer: Long = 0,
++    ) {
++        val inRepair: Boolean get() = home != 0L
++
++        fun answer(rating: CardAnswer.Rating, originalDeck: Long): Progress =
++            if (inRepair) {
++                when (rating) {
++                    CardAnswer.Rating.EASY -> copy(easy = easy + 1)
++                    CardAnswer.Rating.AGAIN -> copy(easy = 0, repairAgain = repairAgain + 1)
++                    else -> copy(easy = 0)
++                }
++            } else if (rating == CardAnswer.Rating.AGAIN) {
++                if (again + 1 >= AGAIN_LIMIT) Progress(epoch, home = originalDeck) else copy(again = again + 1)
++            } else {
++                this
++            }
++    }
++
++    fun settings(col: Collection): Settings? = col.config.get(CONFIG_KEY)
++
++    fun progress(data: String): Progress? {
++        if (data.isBlank()) return null
++        val array = JSONObject(data).optJSONArray(DATA_KEY) ?: return null
++        require(array.length() == 6) { "分流计数格式异常，请暂停规则并检查卡片信息。" }
++        return Progress(array.getLong(0), array.getInt(1), array.getInt(2), array.getLong(3), array.getInt(4), array.getLong(5)).also {
++            require(it.again in 0 until AGAIN_LIMIT && it.easy in 0..EASY_LIMIT && it.home >= 0 && it.repairAgain >= 0) {
++                "分流计数异常，请暂停规则并检查卡片信息。"
++            }
++        }
++    }
++
++    private fun encode(data: String, progress: Progress?): String {
++        val json = if (data.isBlank()) JSONObject() else JSONObject(data)
++        if (progress == null) {
++            json.remove(DATA_KEY)
++        } else {
++            json.put(DATA_KEY, JSONArray(listOf(progress.epoch, progress.again, progress.easy, progress.home, progress.repairAgain, progress.lastAnswer)))
++        }
++        val result = if (json.length() == 0) "" else json.toString()
++        require(result.toByteArray(Charsets.UTF_8).size <= 100) {
++            "这张卡的自定义数据空间不足，答题尚未保存。请暂停分流规则后继续，并保留原数据排查。"
++        }
++        return result
++    }
++
++    fun enable(col: Collection, source: DeckId): Settings {
++        val existing = settings(col)
++        if (existing != null) {
++            require(existing.source == source) { "已有另一牌组的规则，请先停用并归还卡片。" }
++            validate(col, existing)
++            return existing.copy(enabled = true).also { col.config.set(CONFIG_KEY, it) }
++        }
++        require(col.decks.have(source) && !col.decks.isFiltered(source)) { "请在原来的普通单词牌组中启用。" }
++        var name = "单词修复"
++        var suffix = 2
++        while (col.decks.idForName(name) != null) name = "单词修复（${suffix++}）"
++        val repair = col.decks.id(name)
++        // A separate preset keeps edits in the repair deck from altering the source preset.
++        val preset = DeckConfig(JSONObject(col.decks.configDictForDeckId(source).jsonObject.toString()))
++        preset.id = 0
++        preset.name = "$name · 独立设置"
++        preset.new.perDay = 0
++        preset.lapse.leechAction = 1
++        col.decks.save(preset)
++        col.decks.setConfigIdForDeckDict(col.decks.getLegacy(repair)!!, preset.id)
++        return Settings(source, repair, System.currentTimeMillis()).also { col.config.set(CONFIG_KEY, it) }
++    }
++
++    private fun validate(col: Collection, settings: Settings) {
++        require(col.decks.have(settings.source) && col.decks.have(settings.repair)) { "分流牌组已被删除，请先停用规则并恢复牌组。" }
++        require(!col.decks.isFiltered(settings.source) && !col.decks.isFiltered(settings.repair)) { "分流规则需要普通牌组。" }
++        require(!insideSource(col, settings, settings.repair)) { "请把修复组移出原组的子牌组范围，再继续复习。" }
++    }
++
++    private fun insideSource(col: Collection, settings: Settings, deckId: Long): Boolean {
++        val sourceName = col.decks.name(settings.source)
++        val name = col.decks.name(deckId)
++        return deckId == settings.source || name.startsWith("$sourceName::")
++    }
++
++    /** Every native answer path calls this exactly once; failed/duplicate answers never advance progress. */
++    fun answer(col: Collection, input: CardAnswer): OpChanges {
++        val settings = settings(col)
++        val before = col.backend.getCard(input.cardId)
++        val saved = progress(before.customData)
++        // Preview-only filtered answers are not scheduled learning events.
++        val preview = input.currentState.hasFiltered() && !input.currentState.filtered.hasRescheduling()
++        val homeDeck = before.originalDeckId.takeIf { it != 0L } ?: before.deckId
++        val active = settings?.enabled == true && !preview &&
++            (insideSource(col, settings, homeDeck) || saved?.let { it.epoch == settings.epoch && it.inRepair } == true)
++        if (!active) {
++            // Preserve our metadata if ordinary scheduling would otherwise clear customData.
++            val preserved = if (saved == null) input else input.withData(encode(mergedData(before.customData, input.newState.customData), saved))
++            return col.backend.answerCard(preserved)
++        }
++        requireNotNull(settings)
++        validate(col, settings)
++        val recorded = saved?.takeIf { it.epoch == settings.epoch } ?: Progress(settings.epoch)
++        // A crash after the deck move, before clearing the completed round, must not restart repair.
++        val previous = if (recorded.inRepair && recorded.easy >= EASY_LIMIT && homeDeck == recorded.home) {
++            Progress(settings.epoch, lastAnswer = recorded.lastAnswer)
++        } else {
++            recorded
++        }
++        require(input.answeredAtMillis != previous.lastAnswer) { "这次作答已保存，请勿重复提交。" }
++        // A manually moved, unrelated card should not silently be pulled into this rule.
++        require(homeDeck != settings.repair || previous.inRepair) { "此卡未由规则迁入，请将手动加入的卡移回原组。" }
++        val next = previous.answer(input.rating, homeDeck)
++        val destination = when {
++            !previous.inRepair && next.inRepair -> settings.repair
++            next.inRepair && next.easy >= EASY_LIMIT -> next.home
++            next.inRepair && homeDeck != settings.repair -> settings.repair // recover an interrupted move
++            else -> null
++        }
++        if (destination != null) {
++            require(col.decks.have(destination) && !col.decks.isFiltered(destination)) { "原归属牌组已不存在，请先恢复牌组后继续。" }
++        }
++        // Keep the destination until the movement is complete, so interrupted moves are recoverable.
++        val finalProgress = next.copy(lastAnswer = input.answeredAtMillis)
++        val prepared = input.withData(encode(mergedData(before.customData, input.newState.customData), finalProgress))
++        val changes = col.backend.answerCard(prepared)
++        val undoStep = col.backend.getUndoStatus().lastStep
++        try {
++            var extraChanges = false
++            val after = col.backend.getCard(input.cardId)
++            // The explicit routing rule supersedes automatic leech suspension, never manual suspension.
++            if (after.queue == -1 && before.queue >= 0 && input.rating == CardAnswer.Rating.AGAIN && col.sched.stateIsLeech(input.newState)) {
++                col.sched.unsuspendCards(listOf(input.cardId))
++                extraChanges = true
++            }
++            if (destination != null) {
++                col.setDeck(listOf(input.cardId), destination)
++                extraChanges = true
++            }
++            if (next.easy >= EASY_LIMIT) {
++                val moved = col.backend.getCard(input.cardId)
++                val reset = Progress(settings.epoch, lastAnswer = input.answeredAtMillis)
++                col.backend.updateCards(listOf(moved.toBuilder().setCustomData(encode(moved.customData, reset)).build()), false)
++                extraChanges = true
++            }
++            return if (extraChanges) col.backend.mergeUndoEntries(undoStep) else changes
++        } catch (error: Exception) {
++            // Restore the answer and any completed movement together if an additional operation fails.
++            col.backend.mergeUndoEntries(undoStep)
++            col.backend.undo()
++            throw error
++        }
++    }
++
++    private fun mergedData(previous: String, scheduled: String): String {
++        val result = if (previous.isBlank()) JSONObject() else JSONObject(previous)
++        if (scheduled.isNotBlank()) {
++            val newer = JSONObject(scheduled)
++            newer.keys().forEach { key -> if (key != DATA_KEY) result.put(key, newer.get(key)) }
++        }
++        return result.toString()
++    }
++
++    private fun CardAnswer.withData(data: String): CardAnswer =
++        toBuilder().setNewState(newState.toBuilder().setCustomData(data)).build()
++
++    private fun trackedCards(col: Collection, settings: Settings): List<Pair<Long, Progress>> =
++        col.db.queryLongList("select id from cards where data like '%sdr%'").mapNotNull { id ->
++            progress(col.backend.getCard(id).customData)?.takeIf { it.epoch == settings.epoch }?.let { id to it }
++        }
++
++    fun managedCards(col: Collection, settings: Settings): List<Pair<Long, Progress>> =
++        trackedCards(col, settings).filter { it.second.inRepair }
++
++    /** Complete deck moves interrupted by an application/process stop, without adding review events. */
++    fun recoverPendingMoves(col: Collection) {
++        val settings = settings(col)?.takeIf { it.enabled } ?: return
++        validate(col, settings)
++        managedCards(col, settings).forEach { (id, state) ->
++            val card = col.backend.getCard(id)
++            val home = card.originalDeckId.takeIf { it != 0L } ?: card.deckId
++            val expected = if (state.easy >= EASY_LIMIT) state.home else settings.repair
++            require(col.decks.have(expected) && !col.decks.isFiltered(expected)) { "有分流卡的原牌组已不存在，请先恢复。" }
++            if (home != expected || state.easy >= EASY_LIMIT) {
++                val undoStep = col.backend.addCustomUndoEntry("恢复分流卡归属")
++                if (home != expected) col.setDeck(listOf(id), expected)
++                if (state.easy >= EASY_LIMIT) {
++                    val moved = col.backend.getCard(id)
++                    val reset = Progress(settings.epoch, lastAnswer = state.lastAnswer)
++                    col.backend.updateCards(listOf(moved.toBuilder().setCustomData(encode(moved.customData, reset)).build()), false)
++                }
++                col.backend.mergeUndoEntries(undoStep)
++            }
++        }
++    }
++
++    /** Explicit rollback. One native undo restores the disabled setting, cards and counters together. */
++    fun returnAllAndDisable(col: Collection): OpChanges {
++        val settings = requireNotNull(settings(col))
++        val cards = trackedCards(col, settings)
++        cards.filter { it.second.inRepair }.forEach { (_, state) -> require(col.decks.have(state.home) && !col.decks.isFiltered(state.home)) { "有卡片的原牌组已不存在，请先恢复。" } }
++        val undoStep = col.backend.addCustomUndoEntry("停用分流并归还卡片")
++        cards.forEach { (id, state) ->
++            if (state.inRepair) col.setDeck(listOf(id), state.home)
++            val card = col.backend.getCard(id)
++            col.backend.updateCards(listOf(card.toBuilder().setCustomData(encode(card.customData, Progress(settings.epoch))).build()), false)
++        }
++        col.backend.setConfigJson(CONFIG_KEY, Json.encodeToString(settings.copy(enabled = false)).toByteStringUtf8(), true)
++        return col.backend.mergeUndoEntries(undoStep)
++    }
++
++    fun feedback(col: Collection, id: Long, previouslyInRepair: Boolean): String? {
++        val state = progress(col.backend.getCard(id).customData) ?: return null
++        if (settings(col)?.enabled != true) return null
++        return when {
++            state.inRepair && !previouslyInRepair -> "累计 10 次 Again，已移入单词修复"
++            !state.inRepair && previouslyInRepair -> "连续 5 次 Easy，已回到原牌组"
++            state.inRepair -> "修复进度：连续 Easy ${state.easy}/5 · 本轮 Again ${state.repairAgain}"
++            else -> null
++        }
++    }
++}
+diff --git a/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyAnalysisTest.kt b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyAnalysisTest.kt
+new file mode 100644
+--- /dev/null
++++ b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyAnalysisTest.kt
+@@ -0,0 +1,110 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.libanki.sched
++
++import com.ichi2.anki.libanki.testutils.InMemoryAnkiTest
++import com.ichi2.anki.libanki.undo
++import com.ichi2.anki.libanki.redo
++import java.io.File
++import org.json.JSONObject
++import org.junit.Assert.*
++import org.junit.Before
++import org.junit.Rule
++import org.junit.Test
++import org.junit.rules.TemporaryFolder
++
++class StudyAnalysisTest : InMemoryAnkiTest() {
++    @get:Rule val temp = TemporaryFolder()
++    private var source = 0L
++    private var cid = 0L
++    private lateinit var journal: File
++
++    @Before fun fixture() {
++        source = col.decks.id("English")
++        col.decks.select(source)
++        cid = addBasicNote("interference", "SECRET definition [sound:private.mp3]").cards(col).first().id
++        col.setDeck(listOf(cid), source)
++        StudyDiversion.enable(col, source)
++        col.config.set(StudyAnalysis.ENABLED, 1L)
++        journal = temp.newFile()
++        StudyAnalysis.recordingError = false
++        StudyAnalysis.interruptedCard = 0
++    }
++
++    private fun answer(ease: Ease) {
++        val card = col.getCard(cid).apply { startTimer() }
++        StudyAnalysis.answer(col, col.sched.buildAnswer(card, col.backend.getSchedulingStates(cid), ease), journal)
++    }
++    private fun snapshot(mapping: Map<Long, String> = emptyMap()) = StudyAnalysis.snapshot(col, "fixture", mapping, journal)
++
++    @Test fun `unknown note fields stay blank and definitions never enter payload`() {
++        val result = snapshot()
++        assertFalse(result.toString().contains("SECRET"))
++        assertEquals("", result.getJSONArray("notes").getJSONObject(0).getString("word"))
++        val mid = col.db.queryLongScalar("select mid from notes limit 1")
++        val names = col.notetypes.get(mid)!!.fieldsNames
++        assertEquals("interference", snapshot(mapOf(mid to names[0])).getJSONArray("notes").getJSONObject(0).getString("word"))
++    }
++
++    @Test fun `unrelated decks and manually added repair cards are excluded`() {
++        val outsider = col.decks.id("Private")
++        val other = addBasicNote("SECRET unrelated", "SECRET").cards(col).first().id
++        col.setDeck(listOf(other), outsider)
++        assertEquals(1, snapshot().getJSONArray("cards").length())
++        col.setDeck(listOf(other), StudyDiversion.settings(col)!!.repair)
++        assertEquals(1, snapshot().getJSONArray("cards").length())
++    }
++
++    @Test fun `answer metadata follows native undo and redo without stale events`() {
++        answer(Ease.AGAIN)
++        assertEquals(1, snapshot().getJSONArray("events").length())
++        col.undo()
++        assertEquals(0, snapshot().getJSONArray("reviews").length())
++        assertEquals(0, snapshot().getJSONArray("events").length())
++        col.redo()
++        assertEquals(1, snapshot().getJSONArray("events").length())
++    }
++
++    @Test fun `routing round captures enter return and real Again counts`() {
++        repeat(10) { answer(Ease.AGAIN) }
++        val entered = snapshot()
++        val progress = entered.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion")
++        assertEquals(source, progress.getLong("home"))
++        assertEquals("repair", entered.getJSONArray("events").getJSONObject(9).getString("after"))
++        answer(Ease.AGAIN)
++        repeat(5) { answer(Ease.EASY) }
++        val result = snapshot()
++        assertEquals(0L, result.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion").getLong("home"))
++        val returned = result.getJSONArray("events").getJSONObject(15)
++        assertEquals("repair", returned.getString("before"))
++        assertEquals("main", returned.getString("after"))
++        assertEquals(1, returned.getInt("roundAgain"))
++    }
++
++    @Test fun `interruption keeps official answer and flag expires after answer`() {
++        StudyAnalysis.interruptedCard = cid
++        answer(Ease.AGAIN)
++        answer(Ease.GOOD)
++        val events = snapshot().getJSONArray("events")
++        assertTrue(events.getJSONObject(0).getBoolean("interrupted"))
++        assertFalse(events.getJSONObject(1).getBoolean("interrupted"))
++        assertEquals(2, snapshot().getJSONArray("reviews").length())
++    }
++
++    @Test fun `corrupt journal tail preserves older valid events and warns`() {
++        answer(Ease.AGAIN)
++        journal.appendText("partial{")
++        val result = snapshot()
++        assertEquals(1, result.getJSONArray("events").length())
++        assertTrue(result.getJSONArray("warnings").toString().contains("不完整"))
++    }
++
++    @Test fun `new child deck is not automatically added to frozen authorization`() {
++        val repair = StudyDiversion.settings(col)!!.repair
++        val child = col.decks.id("English::new-unapproved")
++        val other = addBasicNote("unapproved", "SECRET").cards(col).first().id
++        col.setDeck(listOf(other), child)
++        val result = StudyAnalysis.snapshot(col, "fixture", eventsFile = journal, authorizedDeckIds = setOf(source, repair))
++        assertEquals(1, result.getJSONArray("cards").length())
++        assertFalse(result.toString().contains("unapproved"))
++    }
++}
+diff --git a/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTest.kt b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTest.kt
+new file mode 100644
+--- /dev/null
++++ b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTest.kt
+@@ -0,0 +1,275 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package com.ichi2.anki.libanki.sched
++
++import com.ichi2.anki.libanki.Card
++import com.ichi2.anki.libanki.CardType
++import com.ichi2.anki.libanki.QueueType
++import com.ichi2.anki.libanki.redo
++import com.ichi2.anki.libanki.testutils.InMemoryAnkiTest
++import com.ichi2.anki.libanki.undo
++import org.json.JSONObject
++import org.junit.Assert.*
++import org.junit.Before
++import org.junit.Test
++import org.junit.jupiter.api.assertThrows
++
++/** Uses the real Anki backend: answers, revlog, deck moves, persistence and native undo. */
++class StudyDiversionTest : InMemoryAnkiTest() {
++    private var source = 0L
++    private var cardId = 0L
++
++    @Before
++    fun createFixture() {
++        source = col.decks.id("英语::4000词")
++        col.decks.select(source)
++        cardId = addBasicNote("interference", "干扰").firstCardId()
++        col.setDeck(listOf(cardId), source)
++    }
++
++    private fun com.ichi2.anki.libanki.Note.firstCardId() = cards(col).first().id
++
++    private fun answer(ease: Ease, id: Long = cardId) {
++        val card = col.getCard(id).apply { startTimer() }
++        val states = col.backend.getSchedulingStates(id)
++        col.sched.answerCard(col.sched.buildAnswer(card, states, ease))
++    }
++
++    private fun state(id: Long = cardId) = StudyDiversion.progress(col.getCard(id).customData)!!
++
++    private fun enable() = StudyDiversion.enable(col, source)
++
++    private fun enterRepair() {
++        repeat(10) { answer(Ease.AGAIN) }
++    }
++
++    @Test
++    fun `existing history is not counted and non Again does not clear main total`() {
++        repeat(12) { answer(Ease.AGAIN) }
++        enable()
++        answer(Ease.AGAIN)
++        assertEquals(1, state().again)
++        answer(Ease.GOOD)
++        assertEquals(1, state().again)
++        assertEquals(source, col.getCard(cardId).did)
++    }
++
++    @Test
++    fun `tenth Again routes after learning answers and preserves revlog`() {
++        val settings = enable()
++        repeat(9) { answer(Ease.AGAIN) }
++        assertEquals(source, col.getCard(cardId).did)
++        answer(Ease.AGAIN)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(source, state().home)
++        assertEquals(0, state().again)
++        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++    }
++
++    @Test
++    fun `five consecutive Easy answers same day return to original child and reset next round`() {
++        val settings = enable()
++        enterRepair()
++        repeat(4) { answer(Ease.EASY) }
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        answer(Ease.EASY)
++        assertEquals(source, col.getCard(cardId).did)
++        assertEquals(0, state().again)
++        assertFalse(state().inRepair)
++        enterRepair()
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(0, state().repairAgain)
++    }
++
++    @Test
++    fun `all non Easy answers break the streak and repair Again is separate`() {
++        enable()
++        enterRepair()
++        for (rating in listOf(Ease.GOOD, Ease.HARD, Ease.AGAIN)) {
++            answer(Ease.EASY)
++            answer(Ease.EASY)
++            answer(rating)
++            assertEquals(0, state().easy)
++        }
++        assertEquals(1, state().repairAgain)
++        assertEquals(0, state().again)
++        repeat(4) { answer(Ease.EASY) }
++        assertTrue(state().inRepair)
++    }
++
++    @Test
++    fun `one undo and redo include answer counter and migration`() {
++        val settings = enable()
++        repeat(9) { answer(Ease.AGAIN) }
++        answer(Ease.AGAIN)
++        col.undo()
++        assertEquals(source, col.getCard(cardId).did)
++        assertEquals(9, state().again)
++        assertEquals(9, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        col.redo()
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertTrue(state().inRepair)
++        repeat(5) { answer(Ease.EASY) }
++        col.undo()
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(4, state().easy)
++    }
++
++    @Test
++    fun `unrelated decks and sibling cards are untouched`() {
++        enable()
++        val other = col.decks.id("数学")
++        col.decks.select(other)
++        val otherId = addBasicNote("limit", "极限").firstCardId()
++        col.setDeck(listOf(otherId), other)
++        repeat(12) { answer(Ease.AGAIN, otherId) }
++        assertEquals(other, col.getCard(otherId).did)
++        assertNull(StudyDiversion.progress(col.getCard(otherId).customData))
++    }
++
++    @Test
++    fun `stored metadata is reloaded from backend and unrelated custom data survives`() {
++        enable()
++        val raw = col.backend.getCard(cardId)
++        col.backend.updateCards(listOf(raw.toBuilder().setCustomData("{\"x\":7}").build()), false)
++        repeat(3) { answer(Ease.AGAIN) }
++        val reloaded = Card(col, cardId)
++        assertEquals(3, StudyDiversion.progress(reloaded.customData)!!.again)
++        assertEquals(7, JSONObject(reloaded.customData).getInt("x"))
++    }
++
++    @Test
++    fun `duplicate submission does not add another answer`() {
++        enable()
++        val card = col.getCard(cardId).apply { startTimer() }
++        val input = col.sched.buildAnswer(card, col.backend.getSchedulingStates(cardId), Ease.AGAIN)
++        col.sched.answerCard(input)
++        assertThrows<IllegalArgumentException> { col.sched.answerCard(input) }
++        assertEquals(1, state().again)
++        assertEquals(1, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++    }
++
++    @Test
++    fun `stop and return all is reversible and does not delete history`() {
++        val settings = enable()
++        enterRepair()
++        StudyDiversion.returnAllAndDisable(col)
++        assertFalse(StudyDiversion.settings(col)!!.enabled)
++        assertEquals(source, col.getCard(cardId).did)
++        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        col.undo()
++        assertTrue(StudyDiversion.settings(col)!!.enabled)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++    }
++
++    @Test
++    fun `missing destination and full custom data fail before saving answer`() {
++        val settings = enable()
++        val raw = col.backend.getCard(cardId)
++        col.backend.updateCards(listOf(raw.toBuilder().setCustomData("{\"x\":\"${"a".repeat(80)}\"}").build()), false)
++        assertThrows<IllegalArgumentException> { answer(Ease.AGAIN) }
++        assertEquals(0, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        col.decks.remove(listOf(settings.repair))
++        assertThrows<IllegalArgumentException> { answer(Ease.AGAIN) }
++    }
++
++    @Test
++    fun `interrupted entry and return recover without adding review history`() {
++        val settings = enable()
++        enterRepair()
++        // Simulate stopping after saving the tenth answer, before the deck change.
++        col.setDeck(listOf(cardId), source)
++        StudyDiversion.recoverPendingMoves(col)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        // Simulate stopping after saving the fifth Easy, before returning.
++        val card = col.backend.getCard(cardId)
++        val data = JSONObject(card.customData)
++        data.getJSONArray(StudyDiversion.DATA_KEY).put(2, 5)
++        col.backend.updateCards(listOf(card.toBuilder().setCustomData(data.toString()).build()), false)
++        StudyDiversion.recoverPendingMoves(col)
++        assertEquals(source, col.getCard(cardId).did)
++        assertFalse(state().inRepair)
++        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++    }
++
++    @Test
++    fun `stop also clears main round and undo restores it`() {
++        enable()
++        repeat(9) { answer(Ease.AGAIN) }
++        StudyDiversion.returnAllAndDisable(col)
++        assertEquals(0, state().again)
++        col.undo()
++        assertEquals(9, state().again)
++    }
++
++    @Test
++    fun `siblings do not share counters or move together`() {
++        val note = addBasicAndReversedNote("front", "back")
++        val siblings = note.cards(col)
++        col.setDeck(siblings.map { it.id }, source)
++        enable()
++        repeat(10) { answer(Ease.AGAIN, siblings.first().id) }
++        assertTrue(state(siblings.first().id).inRepair)
++        assertEquals(source, col.getCard(siblings.last().id).did)
++        assertNull(StudyDiversion.progress(col.getCard(siblings.last().id).customData))
++    }
++
++    @Test
++    fun `parent scope includes children and target cannot be nested inside it`() {
++        val settings = StudyDiversion.enable(col, col.decks.id("英语"))
++        answer(Ease.AGAIN)
++        assertEquals(1, state().again)
++        col.decks.rename(col.decks.getLegacy(settings.repair)!!, "英语::单词修复")
++        assertThrows<IllegalArgumentException> { answer(Ease.AGAIN) }
++        assertEquals(1, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++    }
++
++    @Test
++    fun `native leech suspension cannot stop managed cards before tenth Again`() {
++        val card = col.getCard(cardId)
++        card.queue = QueueType.Rev
++        card.type = CardType.Rev
++        card.ivl = 1
++        card.due = col.sched.today
++        card.lapses = 7
++        col.updateCard(card)
++        enable()
++        answer(Ease.AGAIN)
++        assertNotEquals(QueueType.Suspended, col.getCard(cardId).queue)
++        assertEquals(1, state().again)
++        col.sched.suspendCards(listOf(cardId))
++        StudyDiversion.recoverPendingMoves(col)
++        assertEquals(QueueType.Suspended, col.getCard(cardId).queue)
++    }
++
++    @Test
++    fun `preview mode does not count as a real answer`() {
++        enable()
++        val filtered = addDynamicDeck("预览测试")
++        val deck = col.decks.getLegacy(filtered)!!
++        deck.put("resched", false)
++        col.decks.save(deck)
++        col.sched.rebuildDyn(filtered)
++        answer(Ease.AGAIN)
++        assertNull(StudyDiversion.progress(col.getCard(cardId).customData))
++    }
++
++    @Test
++    fun `rescheduling filtered deck uses actual original home`() {
++        val settings = enable()
++        repeat(9) { answer(Ease.AGAIN) }
++        // Learning cards are not eligible for a filtered deck; use a due review card.
++        val card = col.getCard(cardId)
++        card.queue = QueueType.Rev
++        card.type = CardType.Rev
++        card.due = col.sched.today
++        col.updateCard(card)
++        val filtered = addDynamicDeck("原有攻坚筛选组")
++        col.sched.rebuildDyn(filtered)
++        assertEquals(filtered, col.getCard(cardId).did)
++        answer(Ease.AGAIN)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(source, state().home)
++        repeat(5) { answer(Ease.EASY) }
++        assertEquals(source, col.getCard(cardId).did)
++    }
++}

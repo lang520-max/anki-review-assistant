@@ -1,0 +1,2 @@
+# Lightweight personal route, no Keycloak / PostgreSQL / model API required.
+pydantic==2.13.4

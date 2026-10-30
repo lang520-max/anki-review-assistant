@@ -1,0 +1,7 @@
+{
+  "upstream": "https://github.com/ankidroid/Anki-Android.git",
+  "base": "4f2ec681da36b8307a865f05192498b8425adf0f",
+  "patchSha256": "6757db0a6739ed483711d5f9617d146fa54ce9d8d1260a371a9a5b97c10a6789",
+  "bytes": 157384,
+  "addedFiles": 22
+}
