@@ -11,6 +11,8 @@ __pycache__/
 *.pyc
 *.db
 *.db-*
+*.sqlite3
+*.sqlite3-*
 *.apkg
 *.colpkg
 *.anki2

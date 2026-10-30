@@ -10,6 +10,10 @@ class Analytics:
         self.s = snapshot
         self.cards = {c.id: c for c in snapshot.cards}
         self.notes = {n.id: n for n in snapshot.notes}
+        self.events = {e.reviewId:e for e in getattr(snapshot,"events",[])}
+
+    def timed_rows(self, rows):
+        return [r for r in rows if not (r.id in self.events and self.events[r.id].interrupted)]
 
     def day(self, timestamp_ms):
         wall = datetime.fromtimestamp(timestamp_ms/1000, ZoneInfo(self.s.zoneId)).replace(tzinfo=None)
@@ -49,9 +53,12 @@ class Analytics:
             items = grouped[day]
             notes = {self.cards[r.cardId].noteId for r in items if r.cardId in self.cards}
             elapsed = sum(r.timeMs for r in items)
+            timed = self.timed_rows(items)
             results.append({"day": day.isoformat(), "reviews":len(items),"distinctCards":len({r.cardId for r in items}),
                 "newNotesObserved":sum(n in first and self.day(first[n])==day for n in notes),
-                "timeMs":elapsed,"averageMs":elapsed/len(items) if items else None})
+                "again":sum(r.ease==1 for r in items),
+                "timeMs":elapsed,"averageMs":elapsed/len(items) if items else None,
+                "filteredTimeMs":sum(r.timeMs for r in timed),"excludedInterrupted":len(items)-len(timed)})
         return results
 
     def retention(self,start,end,deck_id=None):
@@ -76,25 +83,55 @@ class Analytics:
             if not again:
                 continue
             note = self.notes.get(nid)
+            timed = self.timed_rows(rows)
             result.append({"noteId":nid,"fields":note.fields if note else [],"cardIds":sorted({r.cardId for r in rows}),
-                "again":len(again),"lastAgain":max(r.id for r in again),"averageMs":sum(r.timeMs for r in rows)/len(rows),"reviews":len(rows)})
-        key={"again":"again","recent":"lastAgain","time":"averageMs","reviews":"reviews"}.get(sort)
+                "again":len(again),"lastAgain":max(r.id for r in again),"averageMs":sum(r.timeMs for r in rows)/len(rows),
+                "filteredAverageMs":sum(r.timeMs for r in timed)/len(timed) if timed else None,
+                "excludedInterrupted":len(rows)-len(timed),"reviews":len(rows)})
+        key={"again":"again","recent":"lastAgain","time":"filteredAverageMs","reviews":"reviews"}.get(sort)
         if key is None:
             raise ValueError("Unknown sort")
-        return sorted(result,key=lambda v:(-v[key],v["noteId"]))
+        return sorted(result,key=lambda v:(-(v[key] or 0),v["noteId"]))
 
     def workload(self, now_ms, deck_id=None):
-        if self.s.creationSeconds is None:
+        if self.s.creationSeconds is None and not hasattr(self.s,"dayIndex"):
             return {"available":False,"reason":"Collection creation/day-cutoff metadata is missing"}
         today = self.day(now_ms)
-        creation = datetime.fromtimestamp(self.s.creationSeconds,ZoneInfo(self.s.zoneId)).date()
-        current = (today-creation).days
+        if hasattr(self.s,"dayIndex"):
+            current = self.s.dayIndex + (today-self.day(self.s.capturedAt)).days
+        else:
+            creation = datetime.fromtimestamp(self.s.creationSeconds,ZoneInfo(self.s.zoneId)).date()
+            current = (today-creation).days
         active = [c for c in self.s.cards if c.originalDeckId==0 and c.queue in (1,2,3) and c.due is not None
                   and (deck_id is None or c.deckId==deck_id)]
         return {"available":True,"estimated":True,"due":sum(c.due<= (now_ms//1000 if c.queue==1 else current) for c in active),
                 "overdue":sum(c.queue in (2,3) and c.due<current for c in active),
                 "future":[{"day":(today+timedelta(days=i)).isoformat(),"scheduled":sum(c.queue in (2,3) and c.due==current+i for c in active)} for i in range(1,31)],
                 "limitations":"Snapshot estimate with configured study-day boundary. Excludes filtered cards, new cards, future answers and future new learning."}
+
+    def repair(self):
+        current = []
+        for c in self.s.cards:
+            p = getattr(c,"diversion",None)
+            if p and p.home:
+                note = self.notes.get(c.noteId)
+                current.append({"cardId":c.id,"word":note.word if note else "","easyStreak":p.easy,
+                    "repairAgain":p.repairAgain,"homeDeckId":p.home})
+        rounds, opened = [], {}
+        for e in sorted(self.events.values(),key=lambda v:v.reviewId):
+            if e.before!="repair" and e.after=="repair":
+                value={"cardId":e.cardId,"enteredAt":e.reviewId,"returnedAt":None,"mainAgain":e.roundAgain,"repairAgain":0}
+                rounds.append(value)
+                opened[e.cardId]=value
+            elif e.before=="repair":
+                value=opened.get(e.cardId)
+                if value:
+                    value["repairAgain"]=e.roundAgain
+                    if e.after!="repair":
+                        value["returnedAt"]=e.reviewId
+                        opened.pop(e.cardId,None)
+        return {"current":current,"rounds":rounds,"analysisEnabledAt":getattr(self.s,"analysisEnabledAt",None),
+                "limitation":"Round events are recorded only after analysis is enabled; older rounds are unknown."}
 
     def query(self, tool, start, end, deck_id=None, card_id=None, sort="again", offset=0, limit=100):
         if end < start or (end-start).days > 3660:
@@ -106,6 +143,8 @@ class Analytics:
             data=self.workload(int(datetime.now(timezone.utc).timestamp()*1000),deck_id)
             if data.get("available"):
                 data["future"]=[v for v in data["future"] if start.isoformat()<=v["day"]<=end.isoformat()]
+        elif tool=="get_repair_progress":
+            data=self.repair()
         elif tool=="get_deck_statistics":
             data=[{"deckId":d.id,"name":d.name,"cards":sum(c.deckId==d.id for c in self.s.cards),
                    "queues":dict(Counter(c.queue for c in self.s.cards if c.deckId==d.id))}
@@ -128,6 +167,9 @@ class Analytics:
         elif tool=="get_study_overview":
             days=self.daily(start,end,deck_id)
             data={"reviews":sum(d["reviews"] for d in days),"timeMs":sum(d["timeMs"] for d in days),
+                  "filteredTimeMs":sum(d["filteredTimeMs"] for d in days),
+                  "excludedInterrupted":sum(d["excludedInterrupted"] for d in days),
+                  "again":sum(d["again"] for d in days),
                   "distinctCards":len({r.cardId for r in self.rows(start,end,deck_id)}),
                   "newNotesObserved":sum(d["newNotesObserved"] for d in days),"retention":self.retention(start,end,deck_id)}
         else:
