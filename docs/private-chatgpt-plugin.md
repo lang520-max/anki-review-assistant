@@ -28,3 +28,5 @@ MCP 地址：`https://47-109-157-25.sslip.io/anki-plugin/mcp`。鉴权：OAuth�
 本地/服务器测试覆盖元数据发现、匿名与上传令牌拒绝、回调与 scope 限制、表单保护、一次性码、PKCE、资源绑定、撤销、刷新轮换与重放、进程重启持久化、真实合成快照读取、空数据和多设备。公网另使用一次性测试连接完整执行初始化、9 个工具发现、同步状态查询与撤销；不打印令牌。
 
 官方接入说明：[Authentication](https://developers.openai.com/plugins/build/auth)、[Connect and test](https://developers.openai.com/plugins/deploy/connect-chatgpt)。文档支持与账号实际可用性应分别验证。
+
+2026-10-30 验收：当前用户 ChatGPT 账号已创建、安装并完成私人 OAuth 授权；9 个工具出现在真实插件工具目录中，已通过正式连接调用 `get_sync_status` 成功返回“手机还没有上传分析数据”。这证明账号连接和工具调用已经走通，不代表已取得真实学习数据或已在手机 App 实测。手机上传后，查询即可使用已授权快照。真实浏览器另验证了表单来源策略和跨域回调；CSP 仅额外允许 `https://chatgpt.com` 回跳，服务端仍精确校验回调 URL。
