@@ -181,7 +181,7 @@ index 31dc8fb..ba87bb3 100644
              statesMutated = true
          }
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
-index 66114aa..44931cb 100644
+index 66114aa..f08ce1d 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
 @@ -38,13 +38,16 @@ import androidx.fragment.app.Fragment
@@ -237,7 +237,7 @@ index 66114aa..44931cb 100644
 +                Triple(rule, source, "原组：${decks.name(source)}（含子牌组）\n" +
 +                    "修复组：${rule?.let { decks.name(it.repair) } ?: "启用时另建独立牌组"}\n" +
 +                    "当前分流：$count 张卡\n\n" +
-+                    "原组累计 10 次 Again 后移出；修复组连续 5 次 Easy 才返回，其他回答清零连续次数。按卡片独立计数，同一天可累计。\n\n" +
++                    "原组累计 5 次 Again 后移出；修复组连续 5 次 Easy 才返回，其他回答清零连续次数。按卡片独立计数，同一天可累计。旧版累计次数保留，已达门槛的卡片下次按 Again 时分流。\n\n" +
 +                    "首次从启用后计数，保留原历史。管理中的卡片不再因原有顽固卡阈值自动暂停。修复组建议每天只学 5–10 分钟，需自行到时停止。")
 +            }
 +            val (rule, source, message) = details
@@ -2245,7 +2245,7 @@ diff --git a/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.k
 new file mode 100644
 --- /dev/null
 +++ b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.kt
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,254 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +package com.ichi2.anki.libanki.sched
 +
@@ -2264,7 +2264,9 @@ new file mode 100644
 +object StudyDiversion {
 +    const val CONFIG_KEY = "studyDiversionV1"
 +    const val DATA_KEY = "sdr"
-+    const val AGAIN_LIMIT = 10
++    const val AGAIN_LIMIT = 5
++    // routing6 stored main counters up to 9. Preserve them across this upgrade.
++    private const val MAX_STORED_AGAIN = 9
 +    const val EASY_LIMIT = 5
 +
 +    @Serializable
@@ -2306,7 +2308,7 @@ new file mode 100644
 +        val array = JSONObject(data).optJSONArray(DATA_KEY) ?: return null
 +        require(array.length() == 6) { "分流计数格式异常，请暂停规则并检查卡片信息。" }
 +        return Progress(array.getLong(0), array.getInt(1), array.getInt(2), array.getLong(3), array.getInt(4), array.getLong(5)).also {
-+            require(it.again in 0 until AGAIN_LIMIT && it.easy in 0..EASY_LIMIT && it.home >= 0 && it.repairAgain >= 0) {
++            require(it.again in 0..MAX_STORED_AGAIN && it.easy in 0..EASY_LIMIT && it.home >= 0 && it.repairAgain >= 0) {
 +                "分流计数异常，请暂停规则并检查卡片信息。"
 +            }
 +        }
@@ -2491,7 +2493,7 @@ new file mode 100644
 +        val state = progress(col.backend.getCard(id).customData) ?: return null
 +        if (settings(col)?.enabled != true) return null
 +        return when {
-+            state.inRepair && !previouslyInRepair -> "累计 10 次 Again，已移入单词修复"
++            state.inRepair && !previouslyInRepair -> "累计达到 $AGAIN_LIMIT 次 Again，已移入单词修复"
 +            !state.inRepair && previouslyInRepair -> "连续 5 次 Easy，已回到原牌组"
 +            state.inRepair -> "修复进度：连续 Easy ${state.easy}/5 · 本轮 Again ${state.repairAgain}"
 +            else -> null
@@ -2570,16 +2572,16 @@ new file mode 100644
 +    }
 +
 +    @Test fun `routing round captures enter return and real Again counts`() {
-+        repeat(10) { answer(Ease.AGAIN) }
++        repeat(5) { answer(Ease.AGAIN) }
 +        val entered = snapshot()
 +        val progress = entered.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion")
 +        assertEquals(source, progress.getLong("home"))
-+        assertEquals("repair", entered.getJSONArray("events").getJSONObject(9).getString("after"))
++        assertEquals("repair", entered.getJSONArray("events").getJSONObject(4).getString("after"))
 +        answer(Ease.AGAIN)
 +        repeat(5) { answer(Ease.EASY) }
 +        val result = snapshot()
 +        assertEquals(0L, result.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion").getLong("home"))
-+        val returned = result.getJSONArray("events").getJSONObject(15)
++        val returned = result.getJSONArray("events").getJSONObject(10)
 +        assertEquals("repair", returned.getString("before"))
 +        assertEquals("main", returned.getString("after"))
 +        assertEquals(1, returned.getInt("roundAgain"))
@@ -2617,7 +2619,7 @@ diff --git a/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTe
 new file mode 100644
 --- /dev/null
 +++ b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTest.kt
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,294 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +package com.ichi2.anki.libanki.sched
 +
@@ -2659,7 +2661,7 @@ new file mode 100644
 +    private fun enable() = StudyDiversion.enable(col, source)
 +
 +    private fun enterRepair() {
-+        repeat(10) { answer(Ease.AGAIN) }
++        repeat(5) { answer(Ease.AGAIN) }
 +    }
 +
 +    @Test
@@ -2674,15 +2676,34 @@ new file mode 100644
 +    }
 +
 +    @Test
-+    fun `tenth Again routes after learning answers and preserves revlog`() {
++    fun `fifth Again routes after learning answers and preserves revlog`() {
 +        val settings = enable()
-+        repeat(9) { answer(Ease.AGAIN) }
++        repeat(4) { answer(Ease.AGAIN) }
 +        assertEquals(source, col.getCard(cardId).did)
 +        answer(Ease.AGAIN)
 +        assertEquals(settings.repair, col.getCard(cardId).did)
 +        assertEquals(source, state().home)
 +        assertEquals(0, state().again)
-+        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        assertEquals(5, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++    }
++
++    @Test
++    fun `routing6 counters above new limit survive and route on next Again`() {
++        val settings = enable()
++        val card = col.backend.getCard(cardId)
++        val data = JSONObject().put(StudyDiversion.DATA_KEY,
++            org.json.JSONArray(listOf(settings.epoch, 9, 0, 0, 0, 0)))
++        col.backend.updateCards(listOf(card.toBuilder().setCustomData(data.toString()).build()), false)
++        StudyDiversion.recoverPendingMoves(col)
++        assertEquals(source, col.getCard(cardId).did)
++        answer(Ease.GOOD)
++        assertEquals(9, state().again)
++        answer(Ease.AGAIN)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(source, state().home)
++        col.undo()
++        assertEquals(9, state().again)
++        assertEquals(source, col.getCard(cardId).did)
 +    }
 +
 +    @Test
@@ -2719,12 +2740,12 @@ new file mode 100644
 +    @Test
 +    fun `one undo and redo include answer counter and migration`() {
 +        val settings = enable()
-+        repeat(9) { answer(Ease.AGAIN) }
++        repeat(4) { answer(Ease.AGAIN) }
 +        answer(Ease.AGAIN)
 +        col.undo()
 +        assertEquals(source, col.getCard(cardId).did)
-+        assertEquals(9, state().again)
-+        assertEquals(9, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        assertEquals(4, state().again)
++        assertEquals(4, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
 +        col.redo()
 +        assertEquals(settings.repair, col.getCard(cardId).did)
 +        assertTrue(state().inRepair)
@@ -2775,7 +2796,7 @@ new file mode 100644
 +        StudyDiversion.returnAllAndDisable(col)
 +        assertFalse(StudyDiversion.settings(col)!!.enabled)
 +        assertEquals(source, col.getCard(cardId).did)
-+        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        assertEquals(5, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
 +        col.undo()
 +        assertTrue(StudyDiversion.settings(col)!!.enabled)
 +        assertEquals(settings.repair, col.getCard(cardId).did)
@@ -2796,7 +2817,7 @@ new file mode 100644
 +    fun `interrupted entry and return recover without adding review history`() {
 +        val settings = enable()
 +        enterRepair()
-+        // Simulate stopping after saving the tenth answer, before the deck change.
++        // Simulate stopping after saving the fifth answer, before the deck change.
 +        col.setDeck(listOf(cardId), source)
 +        StudyDiversion.recoverPendingMoves(col)
 +        assertEquals(settings.repair, col.getCard(cardId).did)
@@ -2808,17 +2829,17 @@ new file mode 100644
 +        StudyDiversion.recoverPendingMoves(col)
 +        assertEquals(source, col.getCard(cardId).did)
 +        assertFalse(state().inRepair)
-+        assertEquals(10, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
++        assertEquals(5, col.db.queryScalar("select count(*) from revlog where cid = ?", cardId))
 +    }
 +
 +    @Test
 +    fun `stop also clears main round and undo restores it`() {
 +        enable()
-+        repeat(9) { answer(Ease.AGAIN) }
++        repeat(4) { answer(Ease.AGAIN) }
 +        StudyDiversion.returnAllAndDisable(col)
 +        assertEquals(0, state().again)
 +        col.undo()
-+        assertEquals(9, state().again)
++        assertEquals(4, state().again)
 +    }
 +
 +    @Test
@@ -2827,7 +2848,7 @@ new file mode 100644
 +        val siblings = note.cards(col)
 +        col.setDeck(siblings.map { it.id }, source)
 +        enable()
-+        repeat(10) { answer(Ease.AGAIN, siblings.first().id) }
++        repeat(5) { answer(Ease.AGAIN, siblings.first().id) }
 +        assertTrue(state(siblings.first().id).inRepair)
 +        assertEquals(source, col.getCard(siblings.last().id).did)
 +        assertNull(StudyDiversion.progress(col.getCard(siblings.last().id).customData))
@@ -2844,7 +2865,7 @@ new file mode 100644
 +    }
 +
 +    @Test
-+    fun `native leech suspension cannot stop managed cards before tenth Again`() {
++    fun `native leech suspension cannot stop managed cards before fifth Again`() {
 +        val card = col.getCard(cardId)
 +        card.queue = QueueType.Rev
 +        card.type = CardType.Rev
@@ -2876,7 +2897,7 @@ new file mode 100644
 +    @Test
 +    fun `rescheduling filtered deck uses actual original home`() {
 +        val settings = enable()
-+        repeat(9) { answer(Ease.AGAIN) }
++        repeat(4) { answer(Ease.AGAIN) }
 +        // Learning cards are not eligible for a filtered deck; use a due review card.
 +        val card = col.getCard(cardId)
 +        card.queue = QueueType.Rev
