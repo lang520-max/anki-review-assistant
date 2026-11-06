@@ -181,7 +181,7 @@ index 31dc8fb..ba87bb3 100644
              statesMutated = true
          }
 diff --git a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
-index 66114aa..f08ce1d 100644
+index 66114aa..36f6f26 100644
 --- a/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
 +++ b/AnkiDroid/src/main/java/com/ichi2/anki/StudyOptionsFragment.kt
 @@ -38,13 +38,16 @@ import androidx.fragment.app.Fragment
@@ -237,23 +237,23 @@ index 66114aa..f08ce1d 100644
 +                Triple(rule, source, "原组：${decks.name(source)}（含子牌组）\n" +
 +                    "修复组：${rule?.let { decks.name(it.repair) } ?: "启用时另建独立牌组"}\n" +
 +                    "当前分流：$count 张卡\n\n" +
-+                    "原组累计 5 次 Again 后移出；修复组连续 5 次 Easy 才返回，其他回答清零连续次数。按卡片独立计数，同一天可累计。旧版累计次数保留，已达门槛的卡片下次按 Again 时分流。\n\n" +
-+                    "首次从启用后计数，保留原历史。管理中的卡片不再因原有顽固卡阈值自动暂停。修复组建议每天只学 5–10 分钟，需自行到时停止。")
++                    "原组：Again +1；Easy 抵消已有1次 Again，最低0；Hard / Good 不变。抵消后达到5才进组。\n\n" +
++                    "修复组：连续5次 Easy 返回，其他评分清零连续次数。按卡独立计数。\n\n" +
++                    "旧计数保留，不追算旧 Easy，不预存抵扣，不启动批量搬移。原始历史保留。修复组建议每天5–10分钟，自行到时停止。")
 +            }
 +            val (rule, source, message) = details
 +            MaterialAlertDialogBuilder(requireContext())
 +                .setTitle(if (rule?.enabled == true) "单词分流 · 已启用" else "单词分流 · 未启用")
 +                .setMessage(message)
-+                .setPositiveButton(if (rule?.enabled == true) "保持启用" else "启用规则") { _, _ ->
++                .setPositiveButton(if (rule?.enabled == true) "关闭" else "启用规则") { _, _ ->
 +                    if (rule?.enabled != true) launchCatchingTask {
 +                        withCol { StudyDiversion.enable(this, source) }
 +                        refreshInterface(true)
 +                        showSnackbar("已启用分流，从本次启用后开始计数")
 +                    }
 +                }
-+                .setNegativeButton("关闭", null)
-+                .apply {
-+                    if (rule != null) setNeutralButton("停用并归还全部") { _, _ ->
++                .setNegativeButton(if (rule != null) "停用并归还" else "关闭") { _, _ ->
++                    if (rule != null) {
 +                        MaterialAlertDialogBuilder(requireContext())
 +                            .setTitle("停用并归还？")
 +                            .setMessage("把本规则分流的卡片放回各自原组，本轮计数归零；复习历史保留。可用撤销恢复。")
@@ -1475,7 +1475,7 @@ diff --git a/README-分流测试.md b/README-分流测试.md
 new file mode 100644
 --- /dev/null
 +++ b/README-分流测试.md
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,59 @@
 +# AnkiDroid 单词分流测试版
 +
 +基于 AnkiDroid **v2.22.3 / Anki 25.07.5 / FSRS 6**。这是个人定制测试版，并非 AnkiDroid 官方发行版。
@@ -1486,11 +1486,12 @@ new file mode 100644
 +
 +## 使用规则
 +
-+1. 首次启用后，每张卡在指定原牌组（含其子牌组）累计 **10 次 Again**，移到独立的“单词修复”普通牌组。普通学习、重学和复习阶段都计算；以前的记录不追算。
++1. 首次启用后，每张卡在指定原牌组（含其子牌组）按作答顺序计数：Again +1，Easy 抵消已有的 1 次 Again，最低 0；Hard / Good 不变。抵消后达到 **5 次 Again**，移到独立的“单词修复”普通牌组。Easy 不预存抵扣，不跨卡抵消，不限7天；普通学习、重学和复习阶段都计算，预览不计算。
 +2. 修复组内连续 **5 次 Easy** 才回到进入前的具体原牌组。Hard、Good、Again 都清零连续次数。正常安排下同一天的多次真实作答可以累计；不会为凑五次额外展示卡片。
 +3. 回原组后从零累计下一轮 Again。修复组的 Again 独立计数，不带回原组，也不创建第三个牌组。
 +4. 复习历史、FSRS 记忆状态、原始评分保留。每张卡独立计数，不把同一笔记下不同方向的卡合并。
 +5. 启用后的受管理卡片不因原有顽固卡阈值自动暂停，避免被旧阈值提前拦住；手动暂停不被此功能解除。
++6. routing8 更新保留原计数和在组状态，不追算更新前的 Easy，不在启动时批量移动卡片。旧版 5–9 次计数也逐次抵消；只有实际按 Again 才检查进组门槛。网站的7日净薄弱统计是另一个指标，不能当作手机本轮进组计数。
 +
 +## 第一次试用
 +
@@ -2137,7 +2138,7 @@ new file mode 100644
 +                        .put("interrupted", interruptedCard == input.cardId)
 +                        .put("roundAgain", when {
 +                            previous?.inRepair == true -> (previous.repairAgain + if (input.rating == CardAnswer.Rating.AGAIN) 1 else 0)
-+                            next?.inRepair == true -> 10
++                            next?.inRepair == true -> previous?.again?.plus(1) ?: 1
 +                            else -> next?.again ?: 0
 +                        })
 +                    FileOutputStream(eventsFile ?: journal(col), true).use { output ->
@@ -2245,7 +2246,7 @@ diff --git a/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.k
 new file mode 100644
 --- /dev/null
 +++ b/libanki/src/main/java/com/ichi2/anki/libanki/sched/StudyDiversion.kt
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,257 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +package com.ichi2.anki.libanki.sched
 +
@@ -2296,6 +2297,9 @@ new file mode 100644
 +                }
 +            } else if (rating == CardAnswer.Rating.AGAIN) {
 +                if (again + 1 >= AGAIN_LIMIT) Progress(epoch, home = originalDeck) else copy(again = again + 1)
++            } else if (rating == CardAnswer.Rating.EASY) {
++                // Only cancel an existing main-round Again; never bank credit for future answers.
++                copy(again = (again - 1).coerceAtLeast(0))
 +            } else {
 +                this
 +            }
@@ -2493,7 +2497,7 @@ new file mode 100644
 +        val state = progress(col.backend.getCard(id).customData) ?: return null
 +        if (settings(col)?.enabled != true) return null
 +        return when {
-+            state.inRepair && !previouslyInRepair -> "累计达到 $AGAIN_LIMIT 次 Again，已移入单词修复"
++            state.inRepair && !previouslyInRepair -> "抵消后累计达到 $AGAIN_LIMIT 次 Again，已移入单词修复"
 +            !state.inRepair && previouslyInRepair -> "连续 5 次 Easy，已回到原牌组"
 +            state.inRepair -> "修复进度：连续 Easy ${state.easy}/5 · 本轮 Again ${state.repairAgain}"
 +            else -> null
@@ -2504,7 +2508,7 @@ diff --git a/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyAnalysisTes
 new file mode 100644
 --- /dev/null
 +++ b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyAnalysisTest.kt
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,122 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +package com.ichi2.anki.libanki.sched
 +
@@ -2577,6 +2581,7 @@ new file mode 100644
 +        val progress = entered.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion")
 +        assertEquals(source, progress.getLong("home"))
 +        assertEquals("repair", entered.getJSONArray("events").getJSONObject(4).getString("after"))
++        assertEquals(5, entered.getJSONArray("events").getJSONObject(4).getInt("roundAgain"))
 +        answer(Ease.AGAIN)
 +        repeat(5) { answer(Ease.EASY) }
 +        val result = snapshot()
@@ -2585,6 +2590,17 @@ new file mode 100644
 +        assertEquals("repair", returned.getString("before"))
 +        assertEquals("main", returned.getString("after"))
 +        assertEquals(1, returned.getInt("roundAgain"))
++    }
++
++    @Test fun `main cancellation is visible in projection without rewriting raw ratings`() {
++        repeat(3) { answer(Ease.AGAIN) }
++        answer(Ease.EASY)
++        val result = snapshot()
++        val events = result.getJSONArray("events")
++        assertEquals(2, events.getJSONObject(3).getInt("roundAgain"))
++        assertEquals(4, events.getJSONObject(3).getInt("rating"))
++        assertEquals(4, result.getJSONArray("reviews").length())
++        assertEquals(2, result.getJSONArray("cards").getJSONObject(0).getJSONObject("diversion").getInt("again"))
 +    }
 +
 +    @Test fun `interruption keeps official answer and flag expires after answer`() {
@@ -2619,7 +2635,7 @@ diff --git a/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTe
 new file mode 100644
 --- /dev/null
 +++ b/libanki/src/test/java/com/ichi2/anki/libanki/sched/StudyDiversionTest.kt
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,412 @@
 +// SPDX-License-Identifier: GPL-3.0-or-later
 +package com.ichi2.anki.libanki.sched
 +
@@ -2662,6 +2678,124 @@ new file mode 100644
 +
 +    private fun enterRepair() {
 +        repeat(5) { answer(Ease.AGAIN) }
++    }
++
++    @Test
++    fun `main Easy cancels exactly one Again and delays entry until net five`() {
++        val settings = enable()
++        repeat(4) { answer(Ease.AGAIN) }
++        answer(Ease.EASY)
++        assertEquals(3, state().again)
++        answer(Ease.HARD)
++        answer(Ease.GOOD)
++        assertEquals(3, state().again)
++        answer(Ease.AGAIN)
++        assertEquals(4, state().again)
++        assertEquals(source, col.getCard(cardId).did)
++        answer(Ease.AGAIN)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++        assertEquals(6, col.db.queryScalar("select count(*) from revlog where cid=? and ease=1", cardId))
++        assertEquals(1, col.db.queryScalar("select count(*) from revlog where cid=? and ease=4", cardId))
++    }
++
++    @Test
++    fun `Easy at zero never banks credit for future Again`() {
++        enable()
++        repeat(3) { answer(Ease.EASY) }
++        assertEquals(0, state().again)
++        answer(Ease.AGAIN)
++        assertEquals(1, state().again)
++        answer(Ease.EASY)
++        answer(Ease.EASY)
++        assertEquals(0, state().again)
++        answer(Ease.AGAIN)
++        assertEquals(1, state().again)
++    }
++
++    @Test
++    fun `Easy cancellation persists and native undo redo restore counter and revlog`() {
++        enable()
++        repeat(3) { answer(Ease.AGAIN) }
++        answer(Ease.EASY)
++        assertEquals(2, StudyDiversion.progress(Card(col, cardId).customData)!!.again)
++        col.undo()
++        assertEquals(3, state().again)
++        assertEquals(0, col.db.queryScalar("select count(*) from revlog where cid=? and ease=4", cardId))
++        col.redo()
++        assertEquals(2, state().again)
++        assertEquals(1, col.db.queryScalar("select count(*) from revlog where cid=? and ease=4", cardId))
++    }
++
++    @Test
++    fun `duplicate Easy answer cannot cancel twice`() {
++        enable()
++        repeat(3) { answer(Ease.AGAIN) }
++        val card = col.getCard(cardId).apply { startTimer() }
++        val input = col.sched.buildAnswer(card, col.backend.getSchedulingStates(cardId), Ease.EASY)
++        col.sched.answerCard(input)
++        assertThrows<IllegalArgumentException> { col.sched.answerCard(input) }
++        assertEquals(2, state().again)
++        assertEquals(4, col.db.queryScalar("select count(*) from revlog where cid=?", cardId))
++    }
++
++    @Test
++    fun `legacy main count is reduced one at a time without startup moves`() {
++        val settings = enable()
++        val card = col.backend.getCard(cardId)
++        val data = JSONObject().put(StudyDiversion.DATA_KEY,
++            org.json.JSONArray(listOf(settings.epoch, 9, 0, 0, 0, 0)))
++        col.backend.updateCards(listOf(card.toBuilder().setCustomData(data.toString()).build()), false)
++        StudyDiversion.recoverPendingMoves(col)
++        assertEquals(9, state().again)
++        repeat(5) { answer(Ease.EASY) }
++        assertEquals(4, state().again)
++        assertEquals(source, col.getCard(cardId).did)
++        answer(Ease.AGAIN)
++        assertEquals(settings.repair, col.getCard(cardId).did)
++    }
++
++    @Test
++    fun `Easy only cancels its own card and repair Again remains separate`() {
++        val siblings = addBasicAndReversedNote("front", "back").cards(col)
++        col.setDeck(siblings.map { it.id }, source)
++        enable()
++        repeat(3) { answer(Ease.AGAIN, siblings.first().id) }
++        answer(Ease.EASY, siblings.last().id)
++        assertEquals(3, state(siblings.first().id).again)
++        assertEquals(0, state(siblings.last().id).again)
++        enterRepair()
++        answer(Ease.AGAIN)
++        answer(Ease.EASY)
++        assertEquals(1, state().repairAgain)
++        assertEquals(1, state().easy)
++        assertTrue(state().inRepair)
++    }
++
++    @Test
++    fun `preview Easy cannot cancel but rescheduling filtered Easy can`() {
++        enable()
++        repeat(3) { answer(Ease.AGAIN) }
++        val card = col.getCard(cardId)
++        card.queue = QueueType.Rev
++        card.type = CardType.Rev
++        card.ivl = 1
++        card.due = col.sched.today
++        col.updateCard(card)
++        val filtered = addDynamicDeck("Easy 预览测试")
++        val deck = col.decks.getLegacy(filtered)!!
++        deck.put("resched", false)
++        col.decks.save(deck)
++        col.sched.rebuildDyn(filtered)
++        answer(Ease.EASY)
++        assertEquals(3, state().again)
++        col.sched.emptyDyn(filtered)
++        deck.put("resched", true)
++        col.decks.save(deck)
++        col.sched.rebuildDyn(filtered)
++        assertEquals(filtered, col.getCard(cardId).did)
++        answer(Ease.EASY)
++        assertEquals(2, state().again)
++        assertEquals(source, col.getCard(cardId).did)
 +    }
 +
 +    @Test

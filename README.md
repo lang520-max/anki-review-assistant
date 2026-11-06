@@ -1,6 +1,6 @@
 # Anki Review Assistant
 
-手机 ChatGPT 私人查询插件见 [接入与权限说明](docs/private-chatgpt-plugin.md)：ECS 提供 9 个只读分析工具，独立 OAuth 授权，不依赖电脑开机。routing7 将 Again 分流门槛改为 5 次，连续 5 次 Easy 返回原组；旧计数保留。
+手机 ChatGPT 私人查询插件见 [接入与权限说明](docs/private-chatgpt-plugin.md)：ECS 提供 9 个只读分析工具，独立 OAuth 授权，不依赖电脑开机。routing8 在原组中一次 Easy 抵消同一卡片已有的一次 Again（最低0），抵消后达到5次才分流；修复组内仍连续5次Easy返回。保留旧计数，不追算更新前的Easy。
 
 新增一体化路线：定制 AnkiDroid 在同一个 App 中完成背词、分流、学习分析和私人上传，手机作为唯一答题来源。手机实现见 [ankidroid-integration](ankidroid-integration/README.md)，轻量 ECS 服务与手动查询见 [手动询问路线](docs/personal-route.md)。此路线使用严格的单词字段上传和完整快照替换；每天 08:00 自动分析暂不实现。下面保留原独立分析 App 的说明，其构建产物不等同于定制背词 App。
 
