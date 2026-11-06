@@ -1,6 +1,6 @@
 # 一体化 AnkiDroid 手机端
 
-本目录维护基于官方 AnkiDroid v2.22.3 的定制差异，与本仓库统计/个人服务一起评审。routing7 起用户日常使用的是包含背词、5 Again 分流、连续 5 Easy 修复、学习分析和私人上传的同一个 App。旧版 0–9 次主组计数继续可读；已有 5–9 次计数不会在启动时批量搬移，下次按 Again 时分流。
+本目录维护基于官方 AnkiDroid v2.22.3 的定制差异，与本仓库统计/个人服务一起评审。routing8 在未进修复组时，按作答顺序执行 Again +1、Easy -1（最低0，不预存抵扣）、Hard / Good 不变，抵消后累计达到5才分流；修复组内仍是连续5次Easy返回。背词、分流、学习分析和私人上传在同一个App内完成。旧版0–9次主组计数继续可读；更新不追算以前的Easy，不在启动时批量搬移。规则按卡独立、按本轮累计，不限7天，也不删除原始作答。
 
 - 上游基线：`4f2ec681da36b8307a865f05192498b8425adf0f`
 - 包名：`com.ichi2.anki.diversion`，沿用已有应用签名，不替换词库。
@@ -20,7 +20,7 @@ git apply /path/to/anki-review-assistant/ankidroid-integration/integrated.patch
 JDK 17、Android SDK 35，构建时设置原签名环境变量 `ANKI_UPDATE_KEYSTORE`。私钥不包含在仓库或源码下载中，维护者必须使用已保存的原文件；不能重新生成密钥替代。
 
 ```text
-gradlew :libanki:testDebugUnitTest --tests com.ichi2.anki.libanki.sched.StudyDiversionTest --tests com.ichi2.anki.libanki.sched.StudyAnalysisTest :AnkiDroid:assembleFullDebug -PdiversionBuild=7 --max-workers=1
+gradlew :libanki:testDebugUnitTest --tests com.ichi2.anki.libanki.sched.StudyDiversionTest --tests com.ichi2.anki.libanki.sched.StudyAnalysisTest :AnkiDroid:assembleFullDebug -PdiversionBuild=8 --max-workers=1
 ```
 
 私人上传和查询的运行边界、部署与备份说明见 [手动询问路线](../docs/personal-route.md)。安装包与完整对应源码使用既有 HTTPS 更新渠道发布；GitHub 保存可复现差异。模拟器成功不代表用户真机已验收。
